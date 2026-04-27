@@ -707,12 +707,18 @@ def update_transaction(sheet: str, row: int, data: UpdateTransaction):
         raise HTTPException(500, str(e))
 
 def run_api():
-    import uvicorn
-    uvicorn.run(app, host='0.0.0.0', port=int(os.environ.get('PORT', 8000)))
+    import asyncio, uvicorn
+    loop = asyncio.new_event_loop()
+    asyncio.set_event_loop(loop)
+    port = int(os.environ.get('PORT', 8000))
+    config = uvicorn.Config(app, host='0.0.0.0', port=port, loop='none')
+    server = uvicorn.Server(config)
+    loop.run_until_complete(server.serve())
 
 if __name__ == '__main__':
     import threading
+    port = int(os.environ.get('PORT', 8000))
+    logger.info(f'Starting API on port {port}')
     api_thread = threading.Thread(target=run_api, daemon=True)
     api_thread.start()
-    logger.info('API server started on port ' + str(os.environ.get('PORT', 8000)))
     main()
