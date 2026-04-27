@@ -31,6 +31,14 @@ def get_ss():
     ])
     return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
 
+async def delete_messages(bot, chat_id, msg_ids):
+    """Berilgan message_id larni o'chirish"""
+    for mid in msg_ids:
+        try:
+            await bot.delete_message(chat_id=chat_id, message_id=mid)
+        except Exception:
+            pass
+
 def clean_num(val):
     if not val: return None
     try:
@@ -268,13 +276,15 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
 
     if d == 'MC':
-        ud.clear(); ud['type'] = 'CHIQIM'
-        await q.message.reply_text('📤 <b>CHIQIM</b>\n\nXarajat turini tanlang:', parse_mode='HTML', reply_markup=kb_chiqim())
+        ud.clear(); ud['type'] = 'CHIQIM'; ud['msgs'] = []
+        m = await q.message.reply_text('📤 <b>CHIQIM</b>\n\nXarajat turini tanlang:', parse_mode='HTML', reply_markup=kb_chiqim())
+        ud['msgs'].append(m.message_id)
         return TUR
 
     if d == 'MK':
-        ud.clear(); ud['type'] = 'KIRIM'
-        await q.message.reply_text('📥 <b>KIRIM</b>\n\nKirim turini tanlang:', parse_mode='HTML', reply_markup=kb_kirim())
+        ud.clear(); ud['type'] = 'KIRIM'; ud['msgs'] = []
+        m = await q.message.reply_text('📥 <b>KIRIM</b>\n\nKirim turini tanlang:', parse_mode='HTML', reply_markup=kb_kirim())
+        ud['msgs'].append(m.message_id)
         return TUR
 
     if d == 'MB':
@@ -305,28 +315,33 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if d.startswith('C|'):
         ud['tur'] = d[2:]
-        await q.message.reply_text(f'📤 <b>{ud["tur"]}</b>\n\nKim sarfladi?', parse_mode='HTML', reply_markup=kb_egasi())
+        m = await q.message.reply_text(f'📤 <b>{ud["tur"]}</b>\n\nKim sarfladi?', parse_mode='HTML', reply_markup=kb_egasi())
+        ud.setdefault('msgs',[]).append(m.message_id)
         return EGASI
 
     if d.startswith('K|'):
         ud['tur'] = d[2:]
-        await q.message.reply_text(f'📥 <b>{ud["tur"]}</b>\n\nKimning kirimi?', parse_mode='HTML', reply_markup=kb_egasi())
+        m = await q.message.reply_text(f'📥 <b>{ud["tur"]}</b>\n\nKimning kirimi?', parse_mode='HTML', reply_markup=kb_egasi())
+        ud.setdefault('msgs',[]).append(m.message_id)
         return EGASI
 
     if d.startswith('E|'):
         ud['egasi'] = d[2:]
-        await q.message.reply_text(f'👤 <b>{ud["egasi"]}</b>\n\nTo\'lov turi?', parse_mode='HTML', reply_markup=kb_tolov())
+        m = await q.message.reply_text(f'👤 <b>{ud["egasi"]}</b>\n\nTo\'lov turi?', parse_mode='HTML', reply_markup=kb_tolov())
+        ud.setdefault('msgs',[]).append(m.message_id)
         return TOLOV
 
     if d.startswith('T|'):
         ud['tolov'] = d[2:]
-        await q.message.reply_text(f'💳 <b>{ud["tolov"]}</b>\n\nValyuta:', parse_mode='HTML', reply_markup=kb_valyuta())
+        m = await q.message.reply_text(f'💳 <b>{ud["tolov"]}</b>\n\nValyuta:', parse_mode='HTML', reply_markup=kb_valyuta())
+        ud.setdefault('msgs',[]).append(m.message_id)
         return VALYUTA
 
     if d.startswith('V|'):
         ud['valyuta'] = d[2:]
         hint = 'Masalan: 150' if ud['valyuta'] == 'USD' else 'Masalan: 350000'
-        await q.message.reply_text(f'💱 <b>{ud["valyuta"]}</b>\n\nSummani yozing:\n<i>{hint}</i>', parse_mode='HTML')
+        m = await q.message.reply_text(f'💱 <b>{ud["valyuta"]}</b>\n\nSummani yozing:\n<i>{hint}</i>', parse_mode='HTML')
+        ud.setdefault('msgs',[]).append(m.message_id)
         return SUMMA
 
     if d == 'SKIP':
@@ -353,6 +368,7 @@ async def get_summa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def get_note(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
+    ctx.user_data.setdefault('msgs',[]).append(update.message.message_id)
     ctx.user_data['note'] = update.message.text.strip()
     await _finalize(update.message, ctx)
     return ConversationHandler.END
@@ -364,12 +380,18 @@ async def _finalize(message, ctx):
             ctx.user_data.clear()
             await message.reply_text('Qaytadan boshlang:', reply_markup=kb_main())
             return
-        await message.reply_text('⏳ Saqlanmoqda...')
+        m_wait = await message.reply_text('⏳ Saqlanmoqda...')
         save_row(st['type'], st)
         bal = get_balance()
         txt = confirm_text(st, bal)
+        # Barcha oraliq xabarlarni o'chirish
+        msgs_to_delete = list(st.get('msgs', []))
+        msgs_to_delete.append(m_wait.message_id)
         ctx.user_data.clear()
+        # Avval yakuniy xabarni yuborish
         await message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
+        # Keyin oraliq xabarlarni o'chirish
+        await delete_messages(message.get_bot(), message.chat_id, msgs_to_delete)
     except Exception as e:
         logger.error(f'finalize: {e}')
         ctx.user_data.clear()
