@@ -290,7 +290,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if d == 'MB':
         await q.message.reply_text('⏳ Balans tekshirilmoqda...', parse_mode='HTML')
         bal = get_balance()
-        await q.message.reply_text(f'💰 <b>Joriy balans: {round(bal, 1)}$</b>', parse_mode='HTML', reply_markup=kb_main())
+        await q.message.reply_text(f'💰 <b>Joriy balans: {int(round(bal))}$</b>', parse_mode='HTML', reply_markup=kb_main())
         return ConversationHandler.END
 
     if d == 'MG':
@@ -307,7 +307,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await q.message.reply_text('⏳ Statistika yuklanmoqda...')
         dv  = get_bugun(); bal = get_balance()
         txt = (f'📊 <b>Statistika</b>\n\n'
-               f'💰 Balans: <b>{round(bal, 1)}$</b>\n'
+               f'💰 Balans: <b>{int(round(bal))}$</b>\n'
                f'Bugungi chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>\n'
                f'Bugungi kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>')
         await q.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
@@ -411,7 +411,7 @@ async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
         txt += ('\n'.join(f'  • {k["tur"]}: {sstr(k["usd"],k["uzs"])}' for k in dv['ki'])) or "  Yo'q"
         txt += (f'\n\n▪️ Jami chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>'
                 f'\n▪️ Jami kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>'
-                f'\n\n💰 <b>BALANCE: {round(bal, 1)}$</b>')
+                f'\n\n💰 <b>BALANCE: {int(round(bal))}$</b>')
         for cid in [CHAT_1, CHAT_2]:
             try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
             except Exception as e: logger.error(f'daily {cid}: {e}')
@@ -521,25 +521,15 @@ def root():
 
 # ── BALANCE ────────────────────────────────────────────────
 @app.get('/balance')
-def get_balance():
+def balance_endpoint():
     try:
         ss = get_ss()
-        for sheet, cell in [('KUNLIK_VIEW','E2'),('DASHBOARD','B2')]:
-            try:
-                raw = ss.worksheet(sheet).acell(cell).value
-                if not raw: continue
-                s = str(raw).replace('$','').replace(' ','').replace('\xa0','').replace('\u202f','')
-                if ',' in s and '.' not in s:
-                    s = s.replace(',','.')
-                elif ',' in s and '.' in s:
-                    s = s.replace('.','').replace(',','.')
-                bal = float(s)
-                if bal > 0:
-                    return {'balance': bal, 'formatted': f'{round(bal, 1)}$'}
-            except: continue
-        return {'balance': 0, 'formatted': '0$'}
+        val = ss.worksheet('DASHBOARD').acell('B2').value
+        bal = fmt_num(val)
+        return {'balance': bal, 'formatted': f'{int(round(bal))}$'}
     except Exception as e:
         raise HTTPException(500, str(e))
+
 # ── BUGUNGI MA'LUMOTLAR ─────────────────────────────────────
 @app.get('/today')
 def get_today():
@@ -704,7 +694,7 @@ def update_transaction(sheet: str, row: int, data: UpdateTransaction):
         if data.egasi:   sh.update(f'D{row}', [[data.egasi]])
         if data.tur:     sh.update(f'E{row}', [[data.tur]])
         if data.tolov:   sh.update(f'F{row}', [[data.tolov]])
-        if data.summa is not None:
+        if data.summa and data.summa > 0:
             if data.valyuta == 'USD':
                 sh.update(f'G{row}', [[data.summa]])
                 sh.update(f'H{row}', [['']])
