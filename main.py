@@ -1,6 +1,5 @@
 #!/usr/bin/env python3
 import os, json, logging
-from typing import Optional
 from datetime import datetime, time as dtime
 import pytz
 import gspread
@@ -474,15 +473,15 @@ class Transaction(BaseModel):
     tolov:   str  # CASH | CARD | OTHER
     valyuta: str  # USD | UZS
     summa:   float
-    note:    Optional[str] = ''
+    note:    str = ''
 
 class UpdateTransaction(BaseModel):
-    egasi:   Optional[str] = None
-    tur:     Optional[str] = None
-    tolov:   Optional[str] = None
-    valyuta: Optional[str] = None
-    summa:   Optional[float] = None
-    note:    Optional[str] = None
+    egasi:   str = ''
+    tur:     str = ''
+    tolov:   str = ''
+    valyuta: str = ''
+    summa:   float = 0
+    note:    str = ''
 
 # ── HELPERS ────────────────────────────────────────────────
 def read_sheet(sheet_name: str):
