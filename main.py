@@ -42,7 +42,12 @@ def get_balance():
 def save_row(sheet_name, st):
     sh      = get_spreadsheet().worksheet(sheet_name)
     rows    = sh.get_all_values()
-    new_row = len(rows) + 1
+    # Oxirgi to'liq qatorni topish
+    last_row = 2
+    for i, row in enumerate(rows):
+        if any(cell.strip() for cell in row):
+            last_row = i + 1
+    new_row = last_row + 1
     today   = datetime.now(TZ).strftime('%d.%m.%Y')
     usd = st['summa'] if st['valyuta'] == 'USD' else ''
     uzs = st['summa'] if st['valyuta'] == 'UZS' else ''
@@ -50,7 +55,6 @@ def save_row(sheet_name, st):
         new_row-2, today, st['egasi'], st['tur'],
         st['tolov'], usd, uzs, '', st.get('note',''), '', ''
     ]])
-
 def get_bugun():
     today = datetime.now(TZ).strftime('%d.%m.%Y')
     ss    = get_spreadsheet()
