@@ -131,6 +131,29 @@ def sstr(u, z):
 def today_str():
     return datetime.now(TZ).strftime('%d.%m.%Y')
 
+def norm_date(s):
+    """Har qanday formatdagi sanani DD.MM.YYYY ga o'tkazadi"""
+    s = str(s).strip()
+    if not s: return ''
+    # DD.MM.YYYY - to'g'ri format
+    if len(s) == 10 and s[2] == '.' and s[5] == '.':
+        return s
+    # Boshqa formatlarni parse qilish
+    for fmt in ['%d/%m/%Y','%m/%d/%Y','%Y-%m-%d','%d-%m-%Y',
+                '%d.%m.%y','%m/%d/%y']:
+        try:
+            from datetime import datetime as dt2
+            return dt2.strptime(s, fmt).strftime('%d.%m.%Y')
+        except: pass
+    # Faqat raqam (date serial) bo'lsa
+    try:
+        n = float(s)
+        from datetime import datetime as dt2, timedelta
+        base = dt2(1899, 12, 30)
+        return (base + timedelta(days=int(n))).strftime('%d.%m.%Y')
+    except: pass
+    return s
+
 def smstr(st):
     if st['valyuta'] == 'USD': return f"{int(round(float(st['summa'])))}$"
     return f"{fmt(st['summa'])} so'm"
