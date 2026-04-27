@@ -34,8 +34,19 @@ def get_ss():
 def clean_num(val):
     if not val: return None
     try:
-        s = str(val).replace(' ','').replace(',','.').replace("'","")
-        s = s.replace('$','').replace("so'm",'').replace('UZS','').replace(' ','')
+        s = str(val)
+        # Barcha keraksiz belgilarni tozalash
+        s = s.replace('$','').replace(' ',' ')
+        s = s.replace(' ',' ').replace(' ',' ')
+        s = s.replace("so'm",'').replace('UZS','').replace("'","")
+        # Bo'shliqlarni o'chirish
+        s = s.strip().replace(' ','')
+        # Vergulni nuqtaga almashtirish (agar oxirgi 3 raqamdan oldin)
+        if ',' in s and '.' not in s:
+            s = s.replace(',', '.')
+        elif ',' in s and '.' in s:
+            # "6.970,60" format — nuqta minglik, vergul kasr
+            s = s.replace('.','').replace(',','.')
         return float(s)
     except: return None
 
@@ -79,11 +90,7 @@ def save_row(sheet_name, st):
     ]], value_input_option='USER_ENTERED')
     # J ga note
     sh.update(f'J{new_row}', [[st.get('note', '')]])
-    # G ustuniga USD format, H ga UZS format
-    if usd_val != '':
-        sh.format(f'G{new_row}', {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00[$-en-US]"}})
-    if uzs_val != '':
-        sh.format(f'H{new_row}', {"numberFormat": {"type": "NUMBER", "pattern": "#,##0' so'\'m'"}})
+
     logger.info(f'Saved to {sheet_name} row {new_row}')
     return new_row
 
