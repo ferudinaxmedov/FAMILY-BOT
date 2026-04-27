@@ -54,7 +54,7 @@ def save_row(sheet_name, st):
     today = datetime.now(TZ).strftime('%d.%m.%Y')
     usd   = st['summa'] if st['valyuta'] == 'USD' else ''
     uzs   = st['summa'] if st['valyuta'] == 'UZS' else ''
-    # Oxirgi to'liq qatorni topish (C ustuni — sana)
+    # C ustunidan oxirgi to'liq qatorni topish
     col_c = sh.col_values(3)
     last  = 2
     for i, v in enumerate(col_c):
@@ -62,10 +62,13 @@ def save_row(sheet_name, st):
         if v and v.strip(): last = i + 1
     new_row = last + 1
     row_num = new_row - 2
-    sh.update(f'B{new_row}:J{new_row}', [[
+    # B:H ga yozish (I ustuni formula — o'tkazib yuboriladi)
+    sh.update(f'B{new_row}:H{new_row}', [[
         row_num, today, st['egasi'], st['tur'],
-        st['tolov'], usd, uzs, '', st.get('note','')
+        st['tolov'], usd, uzs
     ]])
+    # J ga note (K, L formulalar — o'tkazib yuboriladi)
+    sh.update(f'J{new_row}', [[st.get('note', '')]])
     logger.info(f'Saved to {sheet_name} row {new_row}')
     return new_row
 
