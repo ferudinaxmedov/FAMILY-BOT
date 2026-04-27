@@ -33,27 +33,21 @@ def get_ss():
 
 def get_balance():
     try:
-        # KUNLIK varag'idan oxirgi balance qiymatini olish
-        sh   = get_ss().worksheet('KUNLIK')
-        vals = sh.col_values(6)  # F ustun — BALANCE
-        for v in reversed(vals):
-            if v and v.strip():
-                return float(str(v).replace(',','.').replace(' ','').replace("'",""))
-        # DASHBOARD dan olish
-        sh2 = get_ss().worksheet('DASHBOARD')
-        v2  = sh2.acell('B2').value
-        if v2:
-            return float(str(v2).replace(',','.').replace(' ','').replace("'",""))
+        # KUNLIK_VIEW E2 dan balance olish
+        val = get_ss().worksheet('KUNLIK_VIEW').acell('E2').value
+        if val:
+            clean = str(val).replace(',','.').replace(' ','').replace("'","").replace('$','')
+            return float(clean)
         return 0.0
     except Exception as e:
         logger.error(f'balance: {e}')
         return 0.0
 
 def save_row(sheet_name, st):
-    sh    = get_ss().worksheet(sheet_name)
-    today = datetime.now(TZ).strftime('%d.%m.%Y')
-    usd   = st['summa'] if st['valyuta'] == 'USD' else ''
-    uzs   = st['summa'] if st['valyuta'] == 'UZS' else ''
+    sh      = get_ss().worksheet(sheet_name)
+    today   = datetime.now(TZ).strftime('%d.%m.%Y')
+    usd_val = float(st['summa']) if st['valyuta'] == 'USD' else ''
+    uzs_val = float(st['summa']) if st['valyuta'] == 'UZS' else ''
     # C ustunidan oxirgi to'liq qatorni topish
     col_c = sh.col_values(3)
     last  = 2
@@ -65,10 +59,15 @@ def save_row(sheet_name, st):
     # B:H ga yozish (I ustuni formula — o'tkazib yuboriladi)
     sh.update(f'B{new_row}:H{new_row}', [[
         row_num, today, st['egasi'], st['tur'],
-        st['tolov'], usd, uzs
-    ]])
-    # J ga note (K, L formulalar — o'tkazib yuboriladi)
+        st['tolov'], usd_val, uzs_val
+    ]], value_input_option='USER_ENTERED')
+    # J ga note
     sh.update(f'J{new_row}', [[st.get('note', '')]])
+    # G ustuniga USD format, H ga UZS format
+    if usd_val != '':
+        sh.format(f'G{new_row}', {"numberFormat": {"type": "NUMBER", "pattern": "#,##0.00[$-en-US]"}})
+    if uzs_val != '':
+        sh.format(f'H{new_row}', {"numberFormat": {"type": "NUMBER", "pattern": "#,##0' so'\'m'"}})
     logger.info(f'Saved to {sheet_name} row {new_row}')
     return new_row
 
