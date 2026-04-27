@@ -346,6 +346,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if d == 'SKIP':
         ud['note'] = ''
+        ud.setdefault('msgs', []).append(q.message.message_id)
         await _finalize(q.message, ctx)
         return ConversationHandler.END
 
@@ -382,16 +383,20 @@ async def _finalize(message, ctx):
             return
         m_wait = await message.reply_text('⏳ Saqlanmoqda...')
         save_row(st['type'], st)
-        bal = get_balance()
-        txt = confirm_text(st, bal)
-        # Barcha oraliq xabarlarni o'chirish
-        msgs_to_delete = list(st.get('msgs', []))
-        msgs_to_delete.append(m_wait.message_id)
+        bal  = get_balance()
+        txt  = confirm_text(st, bal)
+        msgs = list(st.get('msgs', []))
+        msgs.append(m_wait.message_id)
         ctx.user_data.clear()
-        # Avval yakuniy xabarni yuborish
+        # Yakuniy xabar
         await message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
-        # Keyin oraliq xabarlarni o'chirish
-        await delete_messages(message.get_bot(), message.chat_id, msgs_to_delete)
+        # Oraliq xabarlarni o'chirish — bot va chat_id ni message dan olamiz
+        try:
+            bot     = ctx.application.bot
+            chat_id = message.chat_id
+            await delete_messages(bot, chat_id, msgs)
+        except Exception as de:
+            logger.error(f'delete msgs: {de}')
     except Exception as e:
         logger.error(f'finalize: {e}')
         ctx.user_data.clear()
