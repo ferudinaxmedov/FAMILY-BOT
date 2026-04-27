@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 import os, json, logging
+from typing import Optional
 from datetime import datetime, time as dtime
 import pytz
 import gspread
