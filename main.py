@@ -184,7 +184,7 @@ def smstr(st):
 def confirm_text(st, bal=None):
     lbl = 'CHIQIM' if st['type'] == 'CHIQIM' else 'KIRIM'
     ico = '📤' if st['type'] == 'CHIQIM' else '📥'
-    bal_str = f"{int(round(float(bal)))}$" if bal is not None else '—'
+    bal_str = f"{round(float(bal),2)}$" if bal is not None else '—'
     return (
         f"{ico} <b>{today_str()}</b>\n\n"
         f"▪️ {lbl} TURI: <b>{st['tur']}</b>\n"
@@ -524,9 +524,20 @@ def root():
 def balance_endpoint():
     try:
         ss = get_ss()
-        val = ss.worksheet('DASHBOARD').acell('B2').value
-        bal = fmt_num(val)
-        return {'balance': bal, 'formatted': f'{int(round(bal))}$'}
+        for sheet, cell in [('KUNLIK_VIEW','E2'),('DASHBOARD','B2')]:
+            try:
+                raw = ss.worksheet(sheet).acell(cell).value
+                if not raw: continue
+                s = str(raw).replace('$','').replace(' ','').replace('\xa0','').replace('\u202f','')
+                if ',' in s and '.' not in s:
+                    s = s.replace(',','.')
+                elif ',' in s and '.' in s:
+                    s = s.replace('.','').replace(',','.')
+                bal = float(s)
+                if bal > 0:
+                    return {'balance': round(bal,2), 'formatted': f'{round(bal,2)}$'}
+            except: continue
+        return {'balance': 0, 'formatted': '0$'}
     except Exception as e:
         raise HTTPException(500, str(e))
 
