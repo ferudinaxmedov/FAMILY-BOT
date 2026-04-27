@@ -31,17 +31,33 @@ def get_ss():
     ])
     return gspread.authorize(creds).open_by_key(SPREADSHEET_ID)
 
-def get_balance():
+def clean_num(val):
+    if not val: return None
     try:
-        # KUNLIK_VIEW E2 dan balance olish
-        val = get_ss().worksheet('KUNLIK_VIEW').acell('E2').value
-        if val:
-            clean = str(val).replace(',','.').replace(' ','').replace("'","").replace('$','')
-            return float(clean)
-        return 0.0
-    except Exception as e:
-        logger.error(f'balance: {e}')
-        return 0.0
+        s = str(val).replace(' ','').replace(',','.').replace("'","")
+        s = s.replace('$','').replace("so'm",'').replace('UZS','').replace(' ','')
+        return float(s)
+    except: return None
+
+def get_balance():
+    ss = get_ss()
+    # 1. KUNLIK_VIEW E2
+    try:
+        v = clean_num(ss.worksheet('KUNLIK_VIEW').acell('E2').value)
+        if v is not None and v != 0: return v
+    except Exception as e: logger.error(f'bal kunlik_view: {e}')
+    # 2. DASHBOARD B2
+    try:
+        v = clean_num(ss.worksheet('DASHBOARD').acell('B2').value)
+        if v is not None and v != 0: return v
+    except Exception as e: logger.error(f'bal dashboard: {e}')
+    # 3. DASHBOARD B3
+    try:
+        v = clean_num(ss.worksheet('DASHBOARD').acell('B3').value)
+        if v is not None and v != 0: return v
+    except Exception as e: logger.error(f'bal dashboard b3: {e}')
+    logger.warning('Balance topilmadi, 0 qaytarildi')
+    return 0.0
 
 def save_row(sheet_name, st):
     sh      = get_ss().worksheet(sheet_name)
