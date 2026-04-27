@@ -226,6 +226,21 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     )
     return ConversationHandler.END
 
+async def debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    try:
+        ss = get_ss()
+        # CHIQIM dan birinchi 5 qatorni o'qish
+        rows = ss.worksheet('CHIQIM').get_all_values()
+        lines = [f"CHIQIM jami qator: {len(rows)}"]
+        for i, row in enumerate(rows[2:7]):
+            if any(row):
+                lines.append(f"Qator {i+3}: C='{row[2] if len(row)>2 else '?'}' E='{row[4] if len(row)>4 else '?'}'")
+        lines.append(f"\nBugun: '{today_str()}'")
+        await update.message.reply_text('\n'.join(lines))
+    except Exception as e:
+        await update.message.reply_text(f'Xato: {e}')
+
 async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
     await q.answer()
@@ -380,6 +395,7 @@ def main():
     )
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('menu',  start))
+    app.add_handler(CommandHandler('debug', debug))
     app.add_handler(conv)
     app.job_queue.run_daily(daily_report, time=dtime(hour=18, minute=50, tzinfo=pytz.utc))
     logger.info('Bot ishga tushdi!')
