@@ -524,22 +524,19 @@ def root():
 def get_balance():
     try:
         ss = get_ss()
-        # KUNLIK_VIEW E2 dan olish (Telegram bot kabi)
-        try:
-            val = ss.worksheet('KUNLIK_VIEW').acell('E2').value
-            if val:
-                bal = fmt_num(val)
+        for sheet, cell in [('KUNLIK_VIEW','E2'),('DASHBOARD','B2')]:
+            try:
+                raw = ss.worksheet(sheet).acell(cell).value
+                if not raw: continue
+                s = str(raw).replace('$','').replace(' ','').replace('\xa0','').replace('\u202f','')
+                if ',' in s and '.' not in s:
+                    s = s.replace(',','.')
+                elif ',' in s and '.' in s:
+                    s = s.replace('.','').replace(',','.')
+                bal = float(s)
                 if bal > 0:
                     return {'balance': bal, 'formatted': f'{int(round(bal))}$'}
-        except: pass
-        # DASHBOARD B2 dan olish
-        try:
-            val = ss.worksheet('DASHBOARD').acell('B2').value
-            if val:
-                bal = fmt_num(val)
-                if bal > 0:
-                    return {'balance': bal, 'formatted': f'{int(round(bal))}$'}
-        except: pass
+            except: continue
         return {'balance': 0, 'formatted': '0$'}
     except Exception as e:
         raise HTTPException(500, str(e))
