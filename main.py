@@ -94,30 +94,45 @@ def save_row(sheet_name, st):
     logger.info(f'Saved to {sheet_name} row {new_row}')
     return new_row
 
+def parse_num(s):
+    try:
+        s = str(s).strip().replace(' ','').replace(',','.').replace('$','').replace("so'm",'')
+        return float(s) if s else 0.0
+    except: return 0.0
+
 def get_bugun():
-    today = datetime.now(TZ).strftime('%d.%m.%Y')
+    today = today_str()
     ss    = get_ss()
     r     = dict(ch=[], ki=[], chU=0.0, chZ=0.0, kiU=0.0, kiZ=0.0)
-    try:
-        for row in ss.worksheet('CHIQIM').get_all_values()[2:]:
-            if len(row) < 8 or not row[2] or row[2].strip() != today: continue
-            if not row[4] or not row[4].strip(): continue
-            u = float(row[6]) if row[6] and row[6].strip() else 0.0
-            z = float(row[7]) if row[7] and row[7].strip() else 0.0
-            r['ch'].append({'tur': row[4], 'usd': u, 'uzs': z})
-            r['chU'] += u; r['chZ'] += z
-    except Exception as e: logger.error(f'bugun ch: {e}')
-    try:
-        for row in ss.worksheet('KIRIM').get_all_values()[2:]:
-            if len(row) < 8 or not row[2] or row[2].strip() != today: continue
-            if not row[4] or not row[4].strip(): continue
-            u = float(row[6]) if row[6] and row[6].strip() else 0.0
-            z = float(row[7]) if row[7] and row[7].strip() else 0.0
-            r['ki'].append({'tur': row[4], 'usd': u, 'uzs': z})
-            r['kiU'] += u; r['kiZ'] += z
-    except Exception as e: logger.error(f'bugun ki: {e}')
-    return r
 
+    for sname, target in [('CHIQIM','ch'),('KIRIM','ki')]:
+        try:
+            sh    = ss.worksheet(sname)
+            dates = sh.col_values(3)  # C ustun — sana (1-based)
+            turs  = sh.col_values(5)  # E ustun — tur
+            usds  = sh.col_values(7)  # G ustun — USD
+            uzss  = sh.col_values(8)  # H ustun — UZS
+            n = max(len(dates), len(turs))
+            logger.info(f'{sname}: {n} rows, today={today}')
+            for i in range(2, n):  # 0=row1(bo'sh), 1=row2(header), 2+=data
+                d = str(dates[i]).strip() if i < len(dates) else ''
+                if not d: continue
+                if norm_date(d) != today:
+                    logger.info(f'{sname} row{i+1}: date={repr(d)} norm={norm_date(d)} != {today}')
+                    continue
+                tur = str(turs[i]).strip() if i < len(turs) else ''
+                if not tur: continue
+                u = parse_num(usds[i] if i < len(usds) else '')
+                z = parse_num(uzss[i] if i < len(uzss) else '')
+                logger.info(f'{sname} row{i+1}: tur={tur} u={u} z={z}')
+                item = {'tur':tur,'usd':u,'uzs':z}
+                if target == 'ch':
+                    r['ch'].append(item); r['chU']+=u; r['chZ']+=z
+                else:
+                    r['ki'].append(item); r['kiU']+=u; r['kiZ']+=z
+        except Exception as e:
+            logger.error(f'get_bugun {sname}: {e}')
+    return r
 def fmt(n):
     try: return f"{int(round(float(n))):,}".replace(',', ' ')
     except: return '0'
