@@ -156,6 +156,49 @@ def get_bugun():
             logger.error(f'get_bugun {sname}: {e}')
     return r
 
+def get_filtered(tip, davr, tur):
+    """tip=CHIQIM/KIRIM, davr=bu_oy/otgan_oy/bu_yil/hammasi, tur=OZIQ OVQAT/BARCHASI"""
+    from datetime import datetime
+    now   = datetime.now(TZ)
+    ss    = get_ss()
+    sh    = ss.worksheet(tip)
+    dates = sh.col_values(3)
+    turs  = sh.col_values(5)
+    egasi_col = sh.col_values(4)
+    usds  = sh.col_values(7)
+    uzss  = sh.col_values(8)
+    notes = sh.col_values(10)
+    n     = max(len(dates), len(turs))
+    result = []
+    total_usd = 0.0; total_uzs = 0.0
+    for i in range(2, n):
+        d = str(dates[i]).strip() if i < len(dates) else ''
+        if not d: continue
+        nd = norm_date(d)
+        if not nd: continue
+        try: dt = datetime.strptime(nd, '%d.%m.%Y')
+        except: continue
+        # Davr filtri
+        if davr == 'bu_oy':
+            if dt.month != now.month or dt.year != now.year: continue
+        elif davr == 'otgan_oy':
+            prev = now.month - 1 if now.month > 1 else 12
+            prev_y = now.year if now.month > 1 else now.year - 1
+            if dt.month != prev or dt.year != prev_y: continue
+        elif davr == 'bu_yil':
+            if dt.year != now.year: continue
+        # Tur filtri
+        t = str(turs[i]).strip() if i < len(turs) else ''
+        if not t: continue
+        if tur != 'BARCHASI' and t != tur: continue
+        u = num_clean(usds[i] if i < len(usds) else '')
+        z = num_clean(uzss[i] if i < len(uzss) else '')
+        eg = str(egasi_col[i]).strip() if i < len(egasi_col) else ''
+        nt = str(notes[i]).strip() if i < len(notes) else ''
+        result.append({'sana': nd, 'tur': t, 'egasi': eg, 'usd': u, 'uzs': z, 'note': nt})
+        total_usd += u; total_uzs += z
+    return result, total_usd, total_uzs
+
 async def delete_messages(bot, chat_id, msg_ids):
     for mid in msg_ids:
         try: await bot.delete_message(chat_id=chat_id, message_id=mid)
@@ -167,7 +210,41 @@ def kb_main():
          InlineKeyboardButton('📥 KIRIM',  callback_data='MK')],
         [InlineKeyboardButton('💰 BALANS', callback_data='MB'),
          InlineKeyboardButton('📅 BUGUN',  callback_data='MG')],
-        [InlineKeyboardButton('📊 STATISTIKA', callback_data='MS')]
+        [InlineKeyboardButton('📊 STATISTIKA', callback_data='MS'),
+         InlineKeyboardButton('🔍 HISOBOT', callback_data='MH')]
+    ])
+
+def kb_hisobot_davr():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📅 Bu oy',      callback_data='HD|bu_oy'),
+         InlineKeyboardButton("📅 O'tgan oy",  callback_data="HD|otgan_oy")],
+        [InlineKeyboardButton('📅 Bu yil',     callback_data='HD|bu_yil'),
+         InlineKeyboardButton('📅 Hammasi',    callback_data='HD|hammasi')],
+        [InlineKeyboardButton("🔙 Orqaga",     callback_data="BACK")]
+    ])
+
+def kb_hisobot_tur(tip='CHIQIM'):
+    if tip == 'CHIQIM':
+        turs = ['OZIQ OVQAT','BENZIN','RASSROCHKA','KIYIM KECHAK','XURSHIDGA',
+                'ISHXONAMGA','UYDAGILARGA','SHTRAFLAR','SHOPPPING','ISHXONA REG',
+                'SARTAROSH','BOSHQA']
+    else:
+        turs = ['ISHXONA','SEEDBEE','BUSINESS','UYDAGILAR','BOSHQA']
+    buttons = [[InlineKeyboardButton(f'📋 Barchasi', callback_data=f'HT|BARCHASI')]]
+    row = []
+    for t in turs:
+        row.append(InlineKeyboardButton(t, callback_data=f'HT|{t}'))
+        if len(row) == 2:
+            buttons.append(row); row = []
+    if row: buttons.append(row)
+    buttons.append([InlineKeyboardButton('🔙 Orqaga', callback_data='MH')])
+    return InlineKeyboardMarkup(buttons)
+
+def kb_hisobot_tip():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📤 Chiqimlar', callback_data='HTT|CHIQIM'),
+         InlineKeyboardButton('📥 Kirimlar',  callback_data='HTT|KIRIM')],
+        [InlineKeyboardButton('🔙 Orqaga', callback_data='MH')]
     ])
 
 def kb_chiqim():
@@ -236,6 +313,62 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if d == 'BACK':
         ud.clear()
         await q.message.reply_text('👋 <b>FAMILY ACCOUNTING</b>', parse_mode='HTML', reply_markup=kb_main())
+        return ConversationHandler.END
+
+    if d == 'MH':
+        ud['hisobot'] = {}
+        await q.message.reply_text(
+            '🔍 <b>HISOBOT</b>\n\nAvval amal turini tanlang:',
+            parse_mode='HTML', reply_markup=kb_hisobot_tip()
+        )
+        return ConversationHandler.END
+
+    if d.startswith('HTT|'):
+        tip = d[4:]
+        ud.setdefault('hisobot', {})['tip'] = tip
+        lbl = 'Chiqimlar' if tip == 'CHIQIM' else 'Kirimlar'
+        await q.message.reply_text(
+            f'🔍 <b>{lbl}</b>\n\nQaysi davr?',
+            parse_mode='HTML', reply_markup=kb_hisobot_davr()
+        )
+        return ConversationHandler.END
+
+    if d.startswith('HD|'):
+        davr = d[3:]
+        ud.setdefault('hisobot', {})['davr'] = davr
+        tip  = ud.get('hisobot', {}).get('tip', 'CHIQIM')
+        davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
+        await q.message.reply_text(
+            f'🔍 Davr: <b>{davr_txt}</b>\n\nXarajat turini tanlang:',
+            parse_mode='HTML', reply_markup=kb_hisobot_tur(tip)
+        )
+        return ConversationHandler.END
+
+    if d.startswith('HT|'):
+        tur  = d[3:]
+        h    = ud.get('hisobot', {})
+        tip  = h.get('tip', 'CHIQIM')
+        davr = h.get('davr', 'bu_oy')
+        davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
+        tur_txt  = 'Barchasi' if tur == 'BARCHASI' else tur
+        lbl      = 'CHIQIM' if tip == 'CHIQIM' else 'KIRIM'
+        ico      = '📤' if tip == 'CHIQIM' else '📥'
+        await q.message.reply_text('⏳ Hisobot tayyorlanmoqda...')
+        rows, total_usd, total_uzs = get_filtered(tip, davr, tur)
+        if not rows:
+            txt = f"🔍 <b>{ico} {lbl} — {davr_txt}</b>\nTur: <b>{tur_txt}</b>\n\n📭 Ma'lumot topilmadi."
+        else:
+            txt = f'🔍 <b>{ico} {lbl} — {davr_txt}</b>\nTur: <b>{tur_txt}</b>\nJami: <b>{len(rows)} ta</b>\n\n'
+            # Oxirgi 15 ta ko'rsatish
+            show = rows[-15:] if len(rows) > 15 else rows
+            if len(rows) > 15:
+                txt += f"(Oxirgi 15 ta ko'rsatilmoqda)\n\n"
+            for r in reversed(show):
+                sum_str = sstr(r['usd'], r['uzs'])
+                note_str = f' — {r["note"]}' if r.get('note') else ''
+                txt += f'▪️ <b>{r["sana"]}</b> | {r["tur"]} | {r["egasi"]}\n   💰 {sum_str}{note_str}\n'
+            txt += f'\n📊 <b>JAMI: {sstr(total_usd, total_uzs)}</b>'
+        await q.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
         return ConversationHandler.END
     if d == 'MC':
         ud.clear(); ud['type'] = 'CHIQIM'; ud['msgs'] = []
