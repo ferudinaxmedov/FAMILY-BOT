@@ -21,7 +21,9 @@ CREDS_JSON     = os.environ['GOOGLE_CREDS_JSON']
 TZ             = pytz.timezone('Asia/Tashkent')
 ALLOWED        = {CHAT_1, CHAT_2}
 
-TUR, EGASI, TOLOV, VALYUTA, SUMMA, NOTE, DATE_FROM, DATE_TO = range(8)
+# Conversation states
+TUR, EGASI, TOLOV, VALYUTA, SUMMA, NOTE = range(6)
+H_TIP, H_DAVR, H_TUR, H_DATE_FROM, H_DATE_TO = range(6, 11)
 
 def get_ss():
     info  = json.loads(CREDS_JSON)
@@ -72,9 +74,8 @@ def save_row(sheet_name, st):
         if i < 2: continue
         if v and str(v).strip(): last = i + 1
     new_row = last + 1
-    row_num = new_row - 2
     sh.update(f'B{new_row}:H{new_row}', [[
-        row_num, today, st['egasi'], st['tur'],
+        new_row - 2, today, st['egasi'], st['tur'],
         st['tolov'], usd_val, uzs_val
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[st.get('note', '')]])
@@ -85,14 +86,13 @@ def norm_date(s):
     s = str(s).strip()
     if not s: return ''
     if len(s) == 10 and s[2] == '.' and s[5] == '.': return s
-    for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y', '%m/%d/%y']:
+    for fmt in ['%d/%m/%Y', '%m/%d/%Y', '%Y-%m-%d', '%d-%m-%Y', '%d.%m.%y']:
         try:
-            from datetime import datetime as dt2
-            return dt2.strptime(s, fmt).strftime('%d.%m.%Y')
+            return datetime.strptime(s, fmt).strftime('%d.%m.%Y')
         except: pass
     try:
-        from datetime import datetime as dt2, timedelta
-        return (dt2(1899, 12, 30) + timedelta(days=int(float(s)))).strftime('%d.%m.%Y')
+        from datetime import timedelta
+        return (datetime(1899, 12, 30) + timedelta(days=int(float(s)))).strftime('%d.%m.%Y')
     except: pass
     return s
 
@@ -157,7 +157,6 @@ def get_bugun():
     return r
 
 def get_filtered(tip, davr, tur, date_from=None, date_to=None):
-    from datetime import datetime
     now = datetime.now(TZ)
     ss  = get_ss()
     sh  = ss.worksheet(tip)
@@ -171,7 +170,6 @@ def get_filtered(tip, davr, tur, date_from=None, date_to=None):
     result    = []
     total_usd = 0.0
     total_uzs = 0.0
-    # Parse custom range
     dt_from = None; dt_to = None
     if date_from:
         try: dt_from = datetime.strptime(date_from, '%d.%m.%Y')
@@ -186,7 +184,6 @@ def get_filtered(tip, davr, tur, date_from=None, date_to=None):
         if not nd: continue
         try: dt = datetime.strptime(nd, '%d.%m.%Y')
         except: continue
-        # Davr filtri
         if davr == 'bu_oy':
             if dt.month != now.month or dt.year != now.year: continue
         elif davr == 'otgan_oy':
@@ -198,7 +195,6 @@ def get_filtered(tip, davr, tur, date_from=None, date_to=None):
         elif davr == 'custom':
             if dt_from and dt < dt_from: continue
             if dt_to   and dt > dt_to:   continue
-        # Tur filtri
         t = str(turs[i]).strip() if i < len(turs) else ''
         if not t: continue
         if tur != 'BARCHASI' and t != tur: continue
@@ -215,6 +211,7 @@ async def delete_messages(bot, chat_id, msg_ids):
         try: await bot.delete_message(chat_id=chat_id, message_id=mid)
         except: pass
 
+# ── KLAVIATURALAR ─────────────────────────────────────────
 def kb_main():
     return InlineKeyboardMarkup([
         [InlineKeyboardButton('📤 CHIQIM', callback_data='MC'),
@@ -222,40 +219,7 @@ def kb_main():
         [InlineKeyboardButton('💰 BALANS', callback_data='MB'),
          InlineKeyboardButton('📅 BUGUN',  callback_data='MG')],
         [InlineKeyboardButton('📊 STATISTIKA', callback_data='MS'),
-         InlineKeyboardButton('🔍 HISOBOT', callback_data='MH')]
-    ])
-
-def kb_hisobot_davr():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton('📅 Bu oy',      callback_data='HD|bu_oy'),
-         InlineKeyboardButton("📅 O'tgan oy",  callback_data="HD|otgan_oy")],
-        [InlineKeyboardButton('📅 Bu yil',     callback_data='HD|bu_yil'),
-         InlineKeyboardButton('📅 Hammasi',    callback_data='HD|hammasi')],
-        [InlineKeyboardButton("🔙 Orqaga",     callback_data="BACK")]
-    ])
-
-def kb_hisobot_tur(tip='CHIQIM'):
-    if tip == 'CHIQIM':
-        turs = ['OZIQ OVQAT','BENZIN','RASSROCHKA','KIYIM KECHAK','XURSHIDGA',
-                'ISHXONAMGA','UYDAGILARGA','SHTRAFLAR','SHOPPPING','ISHXONA REG',
-                'SARTAROSH','BOSHQA']
-    else:
-        turs = ['ISHXONA','SEEDBEE','BUSINESS','UYDAGILAR','BOSHQA']
-    buttons = [[InlineKeyboardButton(f'📋 Barchasi', callback_data=f'HT|BARCHASI')]]
-    row = []
-    for t in turs:
-        row.append(InlineKeyboardButton(t, callback_data=f'HT|{t}'))
-        if len(row) == 2:
-            buttons.append(row); row = []
-    if row: buttons.append(row)
-    buttons.append([InlineKeyboardButton('🔙 Orqaga', callback_data='MH')])
-    return InlineKeyboardMarkup(buttons)
-
-def kb_hisobot_tip():
-    return InlineKeyboardMarkup([
-        [InlineKeyboardButton('📤 Chiqimlar', callback_data='HTT|CHIQIM'),
-         InlineKeyboardButton('📥 Kirimlar',  callback_data='HTT|KIRIM')],
-        [InlineKeyboardButton('🔙 Orqaga', callback_data='MH')]
+         InlineKeyboardButton('🔍 HISOBOT',    callback_data='MH')]
     ])
 
 def kb_chiqim():
@@ -290,30 +254,176 @@ kb_tolov   = lambda: InlineKeyboardMarkup([[InlineKeyboardButton('💵 Cash', ca
 kb_valyuta = lambda: InlineKeyboardMarkup([[InlineKeyboardButton('💵 USD ($)', callback_data='V|USD'), InlineKeyboardButton("🇺🇿 UZS (so'm)", callback_data='V|UZS')]])
 kb_note    = lambda: InlineKeyboardMarkup([[InlineKeyboardButton('✅ Done — note kerak emas', callback_data='SKIP')]])
 
+def kb_h_tip():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📤 Chiqimlar', callback_data='HT|CHIQIM'),
+         InlineKeyboardButton('📥 Kirimlar',  callback_data='HT|KIRIM')],
+        [InlineKeyboardButton('🔙 Asosiy',    callback_data='BACK')]
+    ])
+
+def kb_h_davr():
+    return InlineKeyboardMarkup([
+        [InlineKeyboardButton('📅 Bu oy',      callback_data='HD|bu_oy'),
+         InlineKeyboardButton('📅 Otgan oy',   callback_data='HD|otgan_oy')],
+        [InlineKeyboardButton('📅 Bu yil',     callback_data='HD|bu_yil'),
+         InlineKeyboardButton('📅 Hammasi',    callback_data='HD|hammasi')],
+        [InlineKeyboardButton('📆 O\'z sanani kiritish', callback_data='HD|custom')],
+        [InlineKeyboardButton('🔙 Orqaga',     callback_data='MH')]
+    ])
+
+def kb_h_tur(tip='CHIQIM'):
+    turs = ['OZIQ OVQAT','BENZIN','RASSROCHKA','KIYIM KECHAK','XURSHIDGA',
+            'ISHXONAMGA','UYDAGILARGA','SHTRAFLAR','SHOPPPING','ISHXONA REG',
+            'SARTAROSH','BOSHQA'] if tip == 'CHIQIM' else \
+           ['ISHXONA','SEEDBEE','BUSINESS','UYDAGILAR','BOSHQA']
+    buttons = [[InlineKeyboardButton('📋 Barchasi', callback_data='HU|BARCHASI')]]
+    row = []
+    for t in turs:
+        row.append(InlineKeyboardButton(t, callback_data=f'HU|{t}'))
+        if len(row) == 2:
+            buttons.append(row); row = []
+    if row: buttons.append(row)
+    buttons.append([InlineKeyboardButton('🔙 Orqaga', callback_data='HTB')])
+    return InlineKeyboardMarkup(buttons)
+
 def ok(update): return str(update.effective_chat.id) in ALLOWED
 
 async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
     ctx.user_data.clear()
-    await update.message.reply_text('👋 <b>FAMILY ACCOUNTING</b>\n\nNima qilmoqchisiz?', parse_mode='HTML', reply_markup=kb_main())
+    await update.message.reply_text(
+        '👋 <b>FAMILY ACCOUNTING</b>\n\nNima qilmoqchisiz?',
+        parse_mode='HTML', reply_markup=kb_main()
+    )
     return ConversationHandler.END
 
-async def debug(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ok(update): return
-    try:
-        ss  = get_ss()
-        bal = get_balance()
-        rows = ss.worksheet('CHIQIM').get_all_values()
-        lines = [f"Balance: {bal}", f"CHIQIM: {len(rows)} qator"]
-        for i, row in enumerate(rows[2:5]):
-            if any(row):
-                g = row[6] if len(row) > 6 else '?'
-                h = row[7] if len(row) > 7 else '?'
-                lines.append(f"R{i+3}: C={row[2]} E={row[4]} G={repr(g)} H={repr(h)}")
-        await update.message.reply_text('\n'.join(lines))
-    except Exception as e:
-        await update.message.reply_text(f'Xato: {e}')
+# ── HISOBOT CONVERSATION ──────────────────────────────────
+async def hisobot_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """MH button — hisobot boshlanishi"""
+    q = update.callback_query
+    await q.answer()
+    if not ok(update): return ConversationHandler.END
+    ctx.user_data['h'] = {}
+    await q.message.reply_text(
+        '🔍 <b>HISOBOT</b>\n\nAmal turini tanlang:',
+        parse_mode='HTML', reply_markup=kb_h_tip()
+    )
+    return H_TIP
 
+async def hisobot_tip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = q.data
+    if d == 'BACK':
+        await q.message.reply_text('👋 <b>FAMILY ACCOUNTING</b>', parse_mode='HTML', reply_markup=kb_main())
+        return ConversationHandler.END
+    if d.startswith('HT|'):
+        ctx.user_data['h']['tip'] = d[3:]
+        lbl = 'Chiqimlar' if d[3:] == 'CHIQIM' else 'Kirimlar'
+        await q.message.reply_text(
+            f'🔍 <b>{lbl}</b>\n\nQaysi davr?',
+            parse_mode='HTML', reply_markup=kb_h_davr()
+        )
+        return H_DAVR
+    return H_TIP
+
+async def hisobot_davr(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = q.data
+    if d == 'MH':
+        ctx.user_data['h'] = {}
+        await q.message.reply_text('🔍 <b>HISOBOT</b>\n\nAmal turini tanlang:', parse_mode='HTML', reply_markup=kb_h_tip())
+        return H_TIP
+    if d.startswith('HD|'):
+        davr = d[3:]
+        ctx.user_data['h']['davr'] = davr
+        if davr == 'custom':
+            await q.message.reply_text(
+                "📆 <b>Boshlang'ich sanani yozing:</b>\n<i>Masalan: 14.04.2026</i>",
+                parse_mode='HTML'
+            )
+            return H_DATE_FROM
+        tip = ctx.user_data['h'].get('tip', 'CHIQIM')
+        davr_txt = {'bu_oy':'Bu oy','otgan_oy':"Otgan oy",'bu_yil':'Bu yil','hammasi':'Hammasi'}.get(davr, davr)
+        await q.message.reply_text(
+            f'🔍 Davr: <b>{davr_txt}</b>\n\nXarajat turini tanlang:',
+            parse_mode='HTML', reply_markup=kb_h_tur(tip)
+        )
+        return H_TUR
+    return H_DAVR
+
+async def hisobot_date_from(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return H_DATE_FROM
+    txt = update.message.text.strip()
+    try: datetime.strptime(txt, '%d.%m.%Y')
+    except:
+        await update.message.reply_text("❌ Format noto'g'ri. Masalan: <b>14.04.2026</b>", parse_mode='HTML')
+        return H_DATE_FROM
+    ctx.user_data['h']['date_from'] = txt
+    await update.message.reply_text(
+        f"✅ Boshlanish: <b>{txt}</b>\n\n📆 <b>Tugash sanasini yozing:</b>\n<i>Masalan: 28.04.2026</i>",
+        parse_mode='HTML'
+    )
+    return H_DATE_TO
+
+async def hisobot_date_to(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return H_DATE_TO
+    txt = update.message.text.strip()
+    try: datetime.strptime(txt, '%d.%m.%Y')
+    except:
+        await update.message.reply_text("❌ Format noto'g'ri. Masalan: <b>28.04.2026</b>", parse_mode='HTML')
+        return H_DATE_TO
+    ctx.user_data['h']['date_to'] = txt
+    tip = ctx.user_data['h'].get('tip', 'CHIQIM')
+    df  = ctx.user_data['h'].get('date_from', '')
+    await update.message.reply_text(
+        f"✅ <b>{df} — {txt}</b>\n\nXarajat turini tanlang:",
+        parse_mode='HTML', reply_markup=kb_h_tur(tip)
+    )
+    return H_TUR
+
+async def hisobot_tur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    d = q.data
+    if d == 'HTB':
+        tip = ctx.user_data['h'].get('tip', 'CHIQIM')
+        await q.message.reply_text('Davr tanlang:', reply_markup=kb_h_davr())
+        return H_DAVR
+    if d.startswith('HU|'):
+        tur  = d[3:]
+        h    = ctx.user_data.get('h', {})
+        tip  = h.get('tip', 'CHIQIM')
+        davr = h.get('davr', 'bu_oy')
+        df   = h.get('date_from')
+        dt   = h.get('date_to')
+        if davr == 'custom' and df and dt:
+            davr_txt = f'{df} — {dt}'
+        else:
+            davr_txt = {'bu_oy':'Bu oy','otgan_oy':"Otgan oy",'bu_yil':'Bu yil','hammasi':'Hammasi'}.get(davr, davr)
+        tur_txt = 'Barchasi' if tur == 'BARCHASI' else tur
+        lbl = 'CHIQIM' if tip == 'CHIQIM' else 'KIRIM'
+        ico = '📤' if tip == 'CHIQIM' else '📥'
+        await q.message.reply_text('⏳ Hisobot tayyorlanmoqda...')
+        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, df, dt)
+        if not rows:
+            txt = f"🔍 <b>{ico} {lbl}</b>\nDavr: <b>{davr_txt}</b>\nTur: <b>{tur_txt}</b>\n\n📭 Ma'lumot topilmadi."
+        else:
+            txt = f"🔍 <b>{ico} {lbl}</b>\nDavr: <b>{davr_txt}</b>\nTur: <b>{tur_txt}</b>\nJami: <b>{len(rows)} ta</b>\n\n"
+            show = rows[-15:] if len(rows) > 15 else rows
+            if len(rows) > 15:
+                txt += f"(Oxirgi 15 ta)\n\n"
+            for r in reversed(show):
+                sum_str  = sstr(r['usd'], r['uzs'])
+                note_str = f' — {r["note"]}' if r.get('note') else ''
+                txt += f"▪️ <b>{r['sana']}</b> | {r['tur']} | {r['egasi']}\n   💰 {sum_str}{note_str}\n"
+            txt += f"\n📊 <b>JAMI: {sstr(total_usd, total_uzs)}</b>"
+        await q.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
+        return ConversationHandler.END
+    return H_TUR
+
+# ── ASOSIY BOT ────────────────────────────────────────────
 async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q  = update.callback_query
     await q.answer()
@@ -324,72 +434,6 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if d == 'BACK':
         ud.clear()
         await q.message.reply_text('👋 <b>FAMILY ACCOUNTING</b>', parse_mode='HTML', reply_markup=kb_main())
-        return ConversationHandler.END
-
-    if d == 'MH':
-        ud['hisobot'] = {}
-        await q.message.reply_text(
-            '🔍 <b>HISOBOT</b>\n\nAvval amal turini tanlang:',
-            parse_mode='HTML', reply_markup=kb_hisobot_tip()
-        )
-        return ConversationHandler.END
-
-    if d.startswith('HTT|'):
-        tip = d[4:]
-        ud.setdefault('hisobot', {})['tip'] = tip
-        lbl = 'Chiqimlar' if tip == 'CHIQIM' else 'Kirimlar'
-        await q.message.reply_text(
-            f'🔍 <b>{lbl}</b>\n\nQaysi davr?',
-            parse_mode='HTML', reply_markup=kb_hisobot_davr()
-        )
-        return ConversationHandler.END
-
-    if d.startswith('HD|'):
-        davr = d[3:]
-        ud.setdefault('hisobot', {})['davr'] = davr
-        tip  = ud.get('hisobot', {}).get('tip', 'CHIQIM')
-        if davr == 'custom':
-            await q.message.reply_text(
-                "📆 <b>Boshlang'ich sanani yozing:</b>\n<i>Masalan: 14.04.2026</i>",
-                parse_mode='HTML'
-            )
-            return DATE_FROM
-        davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
-        await q.message.reply_text(
-            f'🔍 Davr: <b>{davr_txt}</b>\n\nXarajat turini tanlang:',
-            parse_mode='HTML', reply_markup=kb_hisobot_tur(tip)
-        )
-        return ConversationHandler.END
-
-    if d.startswith('HT|'):
-        tur  = d[3:]
-        h    = ud.get('hisobot', {})
-        tip  = h.get('tip', 'CHIQIM')
-        davr = h.get('davr', 'bu_oy')
-        df   = h.get('date_from')
-        dt   = h.get('date_to')
-        if davr == 'custom' and df and dt:
-            davr_txt = f'{df} — {dt}'
-        else:
-            davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
-        tur_txt = 'Barchasi' if tur == 'BARCHASI' else tur
-        lbl     = 'CHIQIM' if tip == 'CHIQIM' else 'KIRIM'
-        ico     = '📤' if tip == 'CHIQIM' else '📥'
-        await q.message.reply_text('⏳ Hisobot tayyorlanmoqda...')
-        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, df, dt)
-        if not rows:
-            txt = f"🔍 <b>{ico} {lbl} — {davr_txt}</b>\nTur: <b>{tur_txt}</b>\n\n📭 Ma'lumot topilmadi."
-        else:
-            txt = f'🔍 <b>{ico} {lbl} — {davr_txt}</b>\nTur: <b>{tur_txt}</b>\nJami: <b>{len(rows)} ta</b>\n\n'
-            show = rows[-15:] if len(rows) > 15 else rows
-            if len(rows) > 15:
-                txt += f"(Oxirgi 15 ta ko'rsatilmoqda)\n\n"
-            for r in reversed(show):
-                sum_str  = sstr(r['usd'], r['uzs'])
-                note_str = f' — {r["note"]}' if r.get('note') else ''
-                txt += f'▪️ <b>{r["sana"]}</b> | {r["tur"]} | {r["egasi"]}\n   💰 {sum_str}{note_str}\n'
-            txt += f'\n📊 <b>JAMI: {sstr(total_usd, total_uzs)}</b>'
-        await q.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
         return ConversationHandler.END
     if d == 'MC':
         ud.clear(); ud['type'] = 'CHIQIM'; ud['msgs'] = []
@@ -449,44 +493,6 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud.setdefault('msgs', []).append(q.message.message_id)
         await _finalize(q.message, ctx)
         return ConversationHandler.END
-    return ConversationHandler.END
-
-async def get_date_from(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ok(update): return
-    txt = update.message.text.strip()
-    try:
-        from datetime import datetime as dt2
-        dt2.strptime(txt, '%d.%m.%Y')
-    except:
-        await update.message.reply_text(
-            "❌ Noto'g'ri format. Masalan: <b>14.04.2026</b>", parse_mode='HTML'
-        )
-        return DATE_FROM
-    ctx.user_data.setdefault('hisobot', {})['date_from'] = txt
-    await update.message.reply_text(
-        f"✅ Boshlanish: <b>{txt}</b>\n\n📆 <b>Tugash sanasini yozing:</b>\n<i>Masalan: 28.04.2026</i>",
-        parse_mode='HTML'
-    )
-    return DATE_TO
-
-async def get_date_to(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    if not ok(update): return
-    txt = update.message.text.strip()
-    try:
-        from datetime import datetime as dt2
-        dt2.strptime(txt, '%d.%m.%Y')
-    except:
-        await update.message.reply_text(
-            "❌ Noto'g'ri format. Masalan: <b>28.04.2026</b>", parse_mode='HTML'
-        )
-        return DATE_TO
-    ctx.user_data.setdefault('hisobot', {})['date_to'] = txt
-    tip = ctx.user_data.get('hisobot', {}).get('tip', 'CHIQIM')
-    df  = ctx.user_data.get('hisobot', {}).get('date_from', '')
-    await update.message.reply_text(
-        f"✅ <b>{df} — {txt}</b>\n\nXarajat turini tanlang:",
-        parse_mode='HTML', reply_markup=kb_hisobot_tur(tip)
-    )
     return ConversationHandler.END
 
 async def get_summa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -554,27 +560,56 @@ async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logger.error(f'daily_report: {e}')
 
+async def debug_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    try:
+        bal  = get_balance()
+        rows = get_ss().worksheet('CHIQIM').get_all_values()
+        lines = [f"Balance: {bal}", f"CHIQIM: {len(rows)} qator"]
+        for i, row in enumerate(rows[2:4]):
+            if any(row):
+                lines.append(f"R{i+3}: C={row[2]} G={repr(row[6] if len(row)>6 else '?')} H={repr(row[7] if len(row)>7 else '?')}")
+        await update.message.reply_text('\n'.join(lines))
+    except Exception as e:
+        await update.message.reply_text(f'Xato: {e}')
+
 def main():
     app = Application.builder().token(TOKEN).read_timeout(30).write_timeout(30).connect_timeout(30).build()
-    conv = ConversationHandler(
+
+    # Hisobot conversation
+    hisobot_conv = ConversationHandler(
+        entry_points=[CallbackQueryHandler(hisobot_start, pattern='^MH$')],
+        states={
+            H_TIP:       [CallbackQueryHandler(hisobot_tip)],
+            H_DAVR:      [CallbackQueryHandler(hisobot_davr)],
+            H_DATE_FROM: [MessageHandler(filters.TEXT & ~filters.COMMAND, hisobot_date_from)],
+            H_DATE_TO:   [MessageHandler(filters.TEXT & ~filters.COMMAND, hisobot_date_to)],
+            H_TUR:       [CallbackQueryHandler(hisobot_tur)],
+        },
+        fallbacks=[CommandHandler('start', start)],
+        per_message=False
+    )
+
+    # Asosiy kirim/chiqim conversation
+    main_conv = ConversationHandler(
         entry_points=[CallbackQueryHandler(btn)],
         states={
             TUR:     [CallbackQueryHandler(btn)],
             EGASI:   [CallbackQueryHandler(btn)],
             TOLOV:   [CallbackQueryHandler(btn)],
             VALYUTA: [CallbackQueryHandler(btn)],
-            SUMMA:    [MessageHandler(filters.TEXT & ~filters.COMMAND, get_summa), CallbackQueryHandler(btn)],
-            NOTE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, get_note), CallbackQueryHandler(btn)],
-            DATE_FROM:[MessageHandler(filters.TEXT & ~filters.COMMAND, get_date_from)],
-            DATE_TO:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date_to)],
+            SUMMA:   [MessageHandler(filters.TEXT & ~filters.COMMAND, get_summa), CallbackQueryHandler(btn)],
+            NOTE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, get_note), CallbackQueryHandler(btn)],
         },
-        fallbacks=[CommandHandler('start', start), CommandHandler('menu', start)],
+        fallbacks=[CommandHandler('start', start)],
         per_message=False
     )
+
     app.add_handler(CommandHandler('start', start))
     app.add_handler(CommandHandler('menu',  start))
-    app.add_handler(CommandHandler('debug', debug))
-    app.add_handler(conv)
+    app.add_handler(CommandHandler('debug', debug_cmd))
+    app.add_handler(hisobot_conv)
+    app.add_handler(main_conv)
     app.job_queue.run_daily(daily_report, time=dtime(hour=18, minute=50, tzinfo=pytz.utc))
     logger.info('Bot ishga tushdi!')
     app.run_polling(drop_pending_updates=True)
@@ -614,14 +649,12 @@ def read_sheet(sheet_name: str):
         usd = num_clean(row[6]) if len(row) > 6 and row[6] else 0.0
         uzs = num_clean(row[7]) if len(row) > 7 and row[7] else 0.0
         result.append({
-            'row':   i,
-            'type':  sheet_name,
+            'row':   i,   'type':  sheet_name,
             'sana':  norm_date(row[2]),
             'egasi': row[3] if len(row) > 3 else '',
             'tur':   row[4] if len(row) > 4 else '',
             'tolov': row[5] if len(row) > 5 else '',
-            'usd':   usd,
-            'uzs':   uzs,
+            'usd':   usd,  'uzs':   uzs,
             'note':  row[9] if len(row) > 9 else '',
         })
     return result
@@ -678,7 +711,7 @@ def get_today():
                 u = num_clean(usds[i] if i < len(usds) else '')
                 z = num_clean(uzss[i] if i < len(uzss) else '')
                 result[key].append({
-                    'row':   i + 1, 'tur': tur,
+                    'row': i+1, 'tur': tur,
                     'egasi': str(egasi[i]).strip() if i < len(egasi) else '',
                     'tolov': str(tolov[i]).strip() if i < len(tolov) else '',
                     'usd': u, 'uzs': z,
@@ -689,16 +722,6 @@ def get_today():
                 else:
                     result['total_ki_usd'] += u; result['total_ki_uzs'] += z
         return result
-    except Exception as e:
-        raise HTTPException(500, str(e))
-
-@api.get('/by-filter')
-def get_by_filter(tip: str = Query('CHIQIM'), davr: str = Query('bu_oy'),
-                  tur: str = Query('BARCHASI'), date_from: str = Query(None),
-                  date_to: str = Query(None)):
-    try:
-        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, date_from, date_to)
-        return {'rows': rows, 'total_usd': round(total_usd,2), 'total_uzs': round(total_uzs,2), 'count': len(rows)}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -732,6 +755,20 @@ def get_by_date(date: str = Query(...)):
                     'note': str(notes[i]).strip() if i < len(notes) else '',
                 })
         return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@api.get('/by-filter')
+def get_by_filter(
+    tip: str = Query('CHIQIM'),
+    davr: str = Query('bu_oy'),
+    tur: str = Query('BARCHASI'),
+    date_from: str = Query(None),
+    date_to: str = Query(None)
+):
+    try:
+        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, date_from, date_to)
+        return {'rows': rows, 'total_usd': round(total_usd, 2), 'total_uzs': round(total_uzs, 2), 'count': len(rows)}
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -802,7 +839,7 @@ def update_transaction(sheet: str, row: int, data: UpdateTransaction):
 
 def run_api():
     import asyncio, uvicorn
-    loop = asyncio.new_event_loop()
+    loop   = asyncio.new_event_loop()
     asyncio.set_event_loop(loop)
     port   = int(os.environ.get('PORT', 8080))
     config = uvicorn.Config(api, host='0.0.0.0', port=port, loop='none')
