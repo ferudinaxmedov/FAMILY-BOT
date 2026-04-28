@@ -21,7 +21,7 @@ CREDS_JSON     = os.environ['GOOGLE_CREDS_JSON']
 TZ             = pytz.timezone('Asia/Tashkent')
 ALLOWED        = {CHAT_1, CHAT_2}
 
-TUR, EGASI, TOLOV, VALYUTA, SUMMA, NOTE = range(6)
+TUR, EGASI, TOLOV, VALYUTA, SUMMA, NOTE, DATE_FROM, DATE_TO = range(8)
 
 def get_ss():
     info  = json.loads(CREDS_JSON)
@@ -156,21 +156,29 @@ def get_bugun():
             logger.error(f'get_bugun {sname}: {e}')
     return r
 
-def get_filtered(tip, davr, tur):
-    """tip=CHIQIM/KIRIM, davr=bu_oy/otgan_oy/bu_yil/hammasi, tur=OZIQ OVQAT/BARCHASI"""
+def get_filtered(tip, davr, tur, date_from=None, date_to=None):
     from datetime import datetime
-    now   = datetime.now(TZ)
-    ss    = get_ss()
-    sh    = ss.worksheet(tip)
-    dates = sh.col_values(3)
-    turs  = sh.col_values(5)
+    now = datetime.now(TZ)
+    ss  = get_ss()
+    sh  = ss.worksheet(tip)
+    dates     = sh.col_values(3)
+    turs      = sh.col_values(5)
     egasi_col = sh.col_values(4)
-    usds  = sh.col_values(7)
-    uzss  = sh.col_values(8)
-    notes = sh.col_values(10)
-    n     = max(len(dates), len(turs))
-    result = []
-    total_usd = 0.0; total_uzs = 0.0
+    usds      = sh.col_values(7)
+    uzss      = sh.col_values(8)
+    notes     = sh.col_values(10)
+    n         = max(len(dates), len(turs))
+    result    = []
+    total_usd = 0.0
+    total_uzs = 0.0
+    # Parse custom range
+    dt_from = None; dt_to = None
+    if date_from:
+        try: dt_from = datetime.strptime(date_from, '%d.%m.%Y')
+        except: pass
+    if date_to:
+        try: dt_to = datetime.strptime(date_to, '%d.%m.%Y')
+        except: pass
     for i in range(2, n):
         d = str(dates[i]).strip() if i < len(dates) else ''
         if not d: continue
@@ -182,17 +190,20 @@ def get_filtered(tip, davr, tur):
         if davr == 'bu_oy':
             if dt.month != now.month or dt.year != now.year: continue
         elif davr == 'otgan_oy':
-            prev = now.month - 1 if now.month > 1 else 12
+            prev   = now.month - 1 if now.month > 1 else 12
             prev_y = now.year if now.month > 1 else now.year - 1
             if dt.month != prev or dt.year != prev_y: continue
         elif davr == 'bu_yil':
             if dt.year != now.year: continue
+        elif davr == 'custom':
+            if dt_from and dt < dt_from: continue
+            if dt_to   and dt > dt_to:   continue
         # Tur filtri
         t = str(turs[i]).strip() if i < len(turs) else ''
         if not t: continue
         if tur != 'BARCHASI' and t != tur: continue
-        u = num_clean(usds[i] if i < len(usds) else '')
-        z = num_clean(uzss[i] if i < len(uzss) else '')
+        u  = num_clean(usds[i] if i < len(usds) else '')
+        z  = num_clean(uzss[i] if i < len(uzss) else '')
         eg = str(egasi_col[i]).strip() if i < len(egasi_col) else ''
         nt = str(notes[i]).strip() if i < len(notes) else ''
         result.append({'sana': nd, 'tur': t, 'egasi': eg, 'usd': u, 'uzs': z, 'note': nt})
@@ -337,6 +348,12 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         davr = d[3:]
         ud.setdefault('hisobot', {})['davr'] = davr
         tip  = ud.get('hisobot', {}).get('tip', 'CHIQIM')
+        if davr == 'custom':
+            await q.message.reply_text(
+                "📆 <b>Boshlang'ich sanani yozing:</b>\n<i>Masalan: 14.04.2026</i>",
+                parse_mode='HTML'
+            )
+            return DATE_FROM
         davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
         await q.message.reply_text(
             f'🔍 Davr: <b>{davr_txt}</b>\n\nXarajat turini tanlang:',
@@ -349,22 +366,26 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         h    = ud.get('hisobot', {})
         tip  = h.get('tip', 'CHIQIM')
         davr = h.get('davr', 'bu_oy')
-        davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
-        tur_txt  = 'Barchasi' if tur == 'BARCHASI' else tur
-        lbl      = 'CHIQIM' if tip == 'CHIQIM' else 'KIRIM'
-        ico      = '📤' if tip == 'CHIQIM' else '📥'
+        df   = h.get('date_from')
+        dt   = h.get('date_to')
+        if davr == 'custom' and df and dt:
+            davr_txt = f'{df} — {dt}'
+        else:
+            davr_txt = {'bu_oy': 'Bu oy', 'otgan_oy': "O'tgan oy", 'bu_yil': 'Bu yil', 'hammasi': 'Hammasi'}.get(davr, davr)
+        tur_txt = 'Barchasi' if tur == 'BARCHASI' else tur
+        lbl     = 'CHIQIM' if tip == 'CHIQIM' else 'KIRIM'
+        ico     = '📤' if tip == 'CHIQIM' else '📥'
         await q.message.reply_text('⏳ Hisobot tayyorlanmoqda...')
-        rows, total_usd, total_uzs = get_filtered(tip, davr, tur)
+        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, df, dt)
         if not rows:
             txt = f"🔍 <b>{ico} {lbl} — {davr_txt}</b>\nTur: <b>{tur_txt}</b>\n\n📭 Ma'lumot topilmadi."
         else:
             txt = f'🔍 <b>{ico} {lbl} — {davr_txt}</b>\nTur: <b>{tur_txt}</b>\nJami: <b>{len(rows)} ta</b>\n\n'
-            # Oxirgi 15 ta ko'rsatish
             show = rows[-15:] if len(rows) > 15 else rows
             if len(rows) > 15:
                 txt += f"(Oxirgi 15 ta ko'rsatilmoqda)\n\n"
             for r in reversed(show):
-                sum_str = sstr(r['usd'], r['uzs'])
+                sum_str  = sstr(r['usd'], r['uzs'])
                 note_str = f' — {r["note"]}' if r.get('note') else ''
                 txt += f'▪️ <b>{r["sana"]}</b> | {r["tur"]} | {r["egasi"]}\n   💰 {sum_str}{note_str}\n'
             txt += f'\n📊 <b>JAMI: {sstr(total_usd, total_uzs)}</b>'
@@ -428,6 +449,44 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud.setdefault('msgs', []).append(q.message.message_id)
         await _finalize(q.message, ctx)
         return ConversationHandler.END
+    return ConversationHandler.END
+
+async def get_date_from(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    txt = update.message.text.strip()
+    try:
+        from datetime import datetime as dt2
+        dt2.strptime(txt, '%d.%m.%Y')
+    except:
+        await update.message.reply_text(
+            "❌ Noto'g'ri format. Masalan: <b>14.04.2026</b>", parse_mode='HTML'
+        )
+        return DATE_FROM
+    ctx.user_data.setdefault('hisobot', {})['date_from'] = txt
+    await update.message.reply_text(
+        f"✅ Boshlanish: <b>{txt}</b>\n\n📆 <b>Tugash sanasini yozing:</b>\n<i>Masalan: 28.04.2026</i>",
+        parse_mode='HTML'
+    )
+    return DATE_TO
+
+async def get_date_to(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    txt = update.message.text.strip()
+    try:
+        from datetime import datetime as dt2
+        dt2.strptime(txt, '%d.%m.%Y')
+    except:
+        await update.message.reply_text(
+            "❌ Noto'g'ri format. Masalan: <b>28.04.2026</b>", parse_mode='HTML'
+        )
+        return DATE_TO
+    ctx.user_data.setdefault('hisobot', {})['date_to'] = txt
+    tip = ctx.user_data.get('hisobot', {}).get('tip', 'CHIQIM')
+    df  = ctx.user_data.get('hisobot', {}).get('date_from', '')
+    await update.message.reply_text(
+        f"✅ <b>{df} — {txt}</b>\n\nXarajat turini tanlang:",
+        parse_mode='HTML', reply_markup=kb_hisobot_tur(tip)
+    )
     return ConversationHandler.END
 
 async def get_summa(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
@@ -504,8 +563,10 @@ def main():
             EGASI:   [CallbackQueryHandler(btn)],
             TOLOV:   [CallbackQueryHandler(btn)],
             VALYUTA: [CallbackQueryHandler(btn)],
-            SUMMA:   [MessageHandler(filters.TEXT & ~filters.COMMAND, get_summa), CallbackQueryHandler(btn)],
-            NOTE:    [MessageHandler(filters.TEXT & ~filters.COMMAND, get_note), CallbackQueryHandler(btn)],
+            SUMMA:    [MessageHandler(filters.TEXT & ~filters.COMMAND, get_summa), CallbackQueryHandler(btn)],
+            NOTE:     [MessageHandler(filters.TEXT & ~filters.COMMAND, get_note), CallbackQueryHandler(btn)],
+            DATE_FROM:[MessageHandler(filters.TEXT & ~filters.COMMAND, get_date_from)],
+            DATE_TO:  [MessageHandler(filters.TEXT & ~filters.COMMAND, get_date_to)],
         },
         fallbacks=[CommandHandler('start', start), CommandHandler('menu', start)],
         per_message=False
@@ -628,6 +689,16 @@ def get_today():
                 else:
                     result['total_ki_usd'] += u; result['total_ki_uzs'] += z
         return result
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+@api.get('/by-filter')
+def get_by_filter(tip: str = Query('CHIQIM'), davr: str = Query('bu_oy'),
+                  tur: str = Query('BARCHASI'), date_from: str = Query(None),
+                  date_to: str = Query(None)):
+    try:
+        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, date_from, date_to)
+        return {'rows': rows, 'total_usd': round(total_usd,2), 'total_uzs': round(total_uzs,2), 'count': len(rows)}
     except Exception as e:
         raise HTTPException(500, str(e))
 
