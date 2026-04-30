@@ -1012,12 +1012,43 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         try:
             ws    = get_qarz_ws()
             today = today_str()
+
+            # Qarz ma'lumotlarini olish
+            row       = ws.row_values(row_idx)
+            tur       = row[1] if len(row) > 1 else 'BERILGAN'
+            kim       = row[2] if len(row) > 2 else '?'
+            summa_uzs = row[3] if len(row) > 3 and row[3] else ''
+            summa_usd = row[4] if len(row) > 4 and row[4] else ''
+
+            # QARZ ni TUGADI deb belgilash
             ws.update_cell(row_idx, 8, 'TUGADI')
             ws.update_cell(row_idx, 9, today)
-            row = ws.row_values(row_idx)
-            kim = row[2] if len(row) > 2 else '?'
+
+            egasi = 'FERUDIN'
+            if tur == 'BERILGAN':
+                # Bergan qarzim QAYTIB KELDI → KIRIM → balans ko'payadi
+                qarz_to_sheet('KIRIM', egasi, summa_usd, summa_uzs,
+                    f'Qarz qaytdi: {kim}')
+                icon   = '✅💰'
+                effect = "Balansga qaytdi (+)"
+            else:
+                # Olgan qarzimni QAYTARDIM → CHIQIM → balans kamayadi
+                qarz_to_sheet('CHIQIM', egasi, summa_usd, summa_uzs,
+                    f'Qarz qaytarildi: {kim}')
+                icon   = '✅💸'
+                effect = "Balansdan ayrildi (−)"
+
+            bal = get_balance()
+            s_uzs = f"{float(summa_uzs):,.0f} UZS" if summa_uzs else ''
+            s_usd = f"{float(summa_usd):.2f} USD"   if summa_usd else ''
+            summa_str = ' / '.join(filter(None, [s_uzs, s_usd])) or '?'
+
             await q.edit_message_text(
-                f'✅ <b>{kim}</b> qarz qaytarilgan deb belgilandi!\n📅 {today}',
+                f'{icon} <b>{kim}</b> bilan hisob-kitob yakunlandi!\n\n'
+                f'💰 {summa_str}\n'
+                f'📅 {today}\n'
+                f'<i>{effect}</i>\n'
+                f'💰 Joriy balans: <b>{round(bal, 2)}$</b>',
                 parse_mode='HTML')
         except Exception as e:
             await q.edit_message_text(f'❌ Xatolik: {e}')
@@ -1106,29 +1137,71 @@ async def qarz_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _qarz_save(update, q)
         ctx.user_data.pop('qarz_new', None)
 
+def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str):
+    """Qarz operatsiyasini CHIQIM yoki KIRIM ga yozib balansni yangilaydi"""
+    sh    = get_ss().worksheet(sheet_name)
+    today = datetime.now(TZ).strftime('%d.%m.%Y')
+    col_c = sh.col_values(3)
+    last  = 2
+    for i, v in enumerate(col_c):
+        if i < 2: continue
+        if v and str(v).strip(): last = i + 1
+    new_row = last + 1
+    sh.update(f'B{new_row}:H{new_row}', [[
+        new_row - 2, today, egasi, 'BOSHQA', 'CASH',
+        usd_val if usd_val else '',
+        uzs_val if uzs_val else '',
+    ]], value_input_option='USER_ENTERED')
+    sh.update(f'J{new_row}', [[note]])
+    logger.info(f'qarz_to_sheet → {sheet_name} row {new_row}: {note}')
+    return new_row
+
 async def _qarz_save(update, q: dict):
     try:
         await ensure_qarz()
-        ws   = get_qarz_ws()
-        rows = ws.get_all_values()
-        num  = len(rows)
+        ws    = get_qarz_ws()
+        rows  = ws.get_all_values()
+        num   = len(rows)
         today = today_str()
         ws.append_row([
             num, q['tur'], q['kim'],
             q.get('summa_uzs',''), q.get('summa_usd',''),
             today, q['muddat'], 'AKTIV', '', q.get('note','')
         ], value_input_option='USER_ENTERED')
-        s   = _qarz_sum(q)
-        tur = q['tur']
+
+        tur   = q['tur']
+        egasi = 'FERUDIN'
+
+        if tur == 'BERILGAN':
+            # Men qarz BERDIM → CHIQIM → balans kamayadi
+            qarz_to_sheet('CHIQIM', egasi,
+                q.get('summa_usd') or '', q.get('summa_uzs') or '',
+                f"Qarz berildi: {q['kim']}")
+            icon   = '💸'
+            effect = "Balansdan ayrildi (−)"
+        else:
+            # Men qarz OLDIM → KIRIM → balans ko'payadi
+            qarz_to_sheet('KIRIM', egasi,
+                q.get('summa_usd') or '', q.get('summa_uzs') or '',
+                f"Qarz olindi: {q['kim']}")
+            icon   = '💰'
+            effect = "Balansga qo'shildi (+)"
+
+        bal = get_balance()
         arr = '→' if tur == 'BERILGAN' else '←'
+        s   = _qarz_sum(q)
         await update.message.reply_text(
             f'✅ <b>Qarz saqlandi!</b>\n\n'
-            f'{"💸" if tur=="BERILGAN" else "💰"} {arr} <b>{q["kim"]}</b>\n'
-            f'💰 {s}\n📅 {today}\n⏰ Muddat: {q["muddat"]}'
-            + (f'\n📝 {q["note"]}' if q.get("note") else ''),
+            f'{icon} {arr} <b>{q["kim"]}</b>\n'
+            f'💰 {s}\n'
+            f'📅 {today}  ⏰ Muddat: {q["muddat"]}\n'
+            f'<i>{effect}</i>\n'
+            f'💰 Joriy balans: <b>{round(bal, 2)}$</b>'
+            + (f'\n📝 {q["note"]}' if q.get('note') else ''),
             parse_mode='HTML')
     except Exception as e:
         await update.message.reply_text(f'❌ Qarz saqlashda xatolik: {str(e)[:100]}')
+        logger.error(f'_qarz_save: {e}')
 
 # ══════════════════════════════════════════════════════════
 # QARZ MUDDAT NOTIFICATION — kunlik 09:00
@@ -1676,13 +1749,37 @@ def qarz_add_api(q: QarzModel):
 @api.post('/qarz/close/{row_index}')
 def qarz_close_api(row_index: int):
     try:
-        ws    = get_ss().worksheet('QARZ')
-        from datetime import datetime as dt2
-        today = dt2.now(TZ).strftime('%d.%m.%Y')
+        ss    = get_ss()
+        ws    = ss.worksheet('QARZ')
+        today = datetime.now(TZ).strftime('%d.%m.%Y')
+
+        # Qarz ma'lumotlarini olish
+        row       = ws.row_values(row_index)
+        tur       = row[1] if len(row) > 1 else 'BERILGAN'
+        kim       = row[2] if len(row) > 2 else '?'
+        summa_uzs = row[3] if len(row) > 3 and row[3] else ''
+        summa_usd = row[4] if len(row) > 4 and row[4] else ''
+
+        # QARZ ni TUGADI deb belgilash
         ws.update_cell(row_index, 8, 'TUGADI')
         ws.update_cell(row_index, 9, today)
-        return {'success':True}
-    except Exception as e: raise HTTPException(500, str(e))
+
+        egasi = 'FERUDIN'
+        if tur == 'BERILGAN':
+            # Bergan qarzim qaytdi → KIRIM (balans +)
+            qarz_to_sheet('KIRIM', egasi, summa_usd, summa_uzs,
+                f'Qarz qaytdi: {kim}')
+            effect = 'balance_plus'
+        else:
+            # Olgan qarzimni qaytardim → CHIQIM (balans −)
+            qarz_to_sheet('CHIQIM', egasi, summa_usd, summa_uzs,
+                f'Qarz qaytarildi: {kim}')
+            effect = 'balance_minus'
+
+        bal = get_balance()
+        return {'success': True, 'effect': effect, 'balance': round(bal, 2), 'kim': kim}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 # ── KATEGORIYALAR API ────────────────────────────────────
 @api.get('/categories')
