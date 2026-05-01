@@ -1130,8 +1130,8 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             row       = ws.row_values(row_idx)
             tur       = row[1] if len(row) > 1 else 'BERILGAN'
             kim       = row[2] if len(row) > 2 else '?'
-            summa_uzs = row[3] if len(row) > 3 and row[3] else ''
-            summa_usd = row[4] if len(row) > 4 and row[4] else ''
+            summa_uzs = row[3] if len(row) > 3 and row[3] and str(row[3]).strip() else None
+            summa_usd = row[4] if len(row) > 4 and row[4] and str(row[4]).strip() else None
 
             # QARZ ni TUGADI deb belgilash
             ws.update_cell(row_idx, 8, 'TUGADI')
@@ -1261,26 +1261,27 @@ async def qarz_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ctx.user_data.pop('qarz_new', None)
 
 def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str) -> int:
-    """Qarz operatsiyasini CHIQIM yoki KIRIM varag'iga yozib balans yangilaydi."""
     sh    = get_ss().worksheet(sheet_name)
     today = datetime.now(TZ).strftime('%d.%m.%Y')
-    now_t = datetime.now(TZ).strftime('%H:%M')
     col_c = sh.col_values(3)
     last  = 2
     for i, v in enumerate(col_c):
         if i < 2: continue
         if v and str(v).strip(): last = i + 1
     new_row = last + 1
-    usd_w = float(usd_val) if usd_val and str(usd_val).strip() else ''
-    uzs_w = float(uzs_val) if uzs_val and str(uzs_val).strip() else ''
-    sh.update(f'B{new_row}:I{new_row}', [[
-        new_row - 2, today, egasi, 'BOSHQA', 'CASH',
-        usd_w, uzs_w, now_t
+
+    try: usd = float(usd_val) if usd_val and str(usd_val).strip() not in ('', '0', '0.0') else ''
+    except: usd = ''
+    try: uzs = float(uzs_val) if uzs_val and str(uzs_val).strip() not in ('', '0', '0.0') else ''
+    except: uzs = ''
+
+    logger.info(f'qarz_to_sheet: {sheet_name} | usd={usd} | uzs={uzs} | note={note}')
+
+    sh.update(f'B{new_row}:H{new_row}', [[
+        new_row - 2, today, egasi, 'BOSHQA', 'CASH', usd, uzs
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[note]])
-    logger.info(
-        f'qarz_to_sheet ✓ → {sheet_name} row={new_row} '
-        f'usd={usd_w} uzs={uzs_w} note="{note}"')
+    logger.info(f'qarz_to_sheet SAQLANDI: {sheet_name} row {new_row}')
     return new_row
 
 async def _qarz_save(update, q: dict):
@@ -1298,8 +1299,8 @@ async def _qarz_save(update, q: dict):
 
         tur   = q['tur']
         egasi = 'FERUDIN'
-        usd_v = q.get('summa_usd') or ''
-        uzs_v = q.get('summa_uzs') or ''
+        usd_v = q.get('summa_usd') or None
+        uzs_v = q.get('summa_uzs') or None
 
         if tur == 'BERILGAN':
             # BERDIM → CHIQIM (balans kamayadi)
@@ -1307,7 +1308,6 @@ async def _qarz_save(update, q: dict):
                 await asyncio.to_thread(
                     qarz_to_sheet, 'CHIQIM', egasi, usd_v, uzs_v,
                     f"Qarz berildi: {q['kim']}")
-                logger.info(f"qarz_to_sheet CHIQIM OK: {q['kim']} usd={usd_v} uzs={uzs_v}")
             except Exception as se:
                 logger.error(f"qarz_to_sheet CHIQIM FAILED: {se}")
                 await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
@@ -1319,7 +1319,6 @@ async def _qarz_save(update, q: dict):
                 await asyncio.to_thread(
                     qarz_to_sheet, 'KIRIM', egasi, usd_v, uzs_v,
                     f"Qarz olindi: {q['kim']}")
-                logger.info(f"qarz_to_sheet KIRIM OK: {q['kim']} usd={usd_v} uzs={uzs_v}")
             except Exception as se:
                 logger.error(f"qarz_to_sheet KIRIM FAILED: {se}")
                 await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
