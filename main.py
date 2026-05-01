@@ -10,7 +10,7 @@ from io import BytesIO
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
     MessageHandler, ConversationHandler, filters, ContextTypes
@@ -311,6 +311,16 @@ def kb_main():
          InlineKeyboardButton('⚙️ ADMIN',      callback_data='ADMIN_MENU')],
     ])
 
+def kb_reply_main():
+    return ReplyKeyboardMarkup([
+        ['📤 Chiqim',     '📥 Kirim'],
+        ['💰 Balans',     '📅 Bugun'],
+        ['📊 Statistika', '🔍 Hisobot'],
+        ['💳 Qarz',       '✅ Tasklar'],
+        ['🧠 Xotira',     '🕌 Namoz'],
+        ['⚙️ Admin',      '❓ Yordam'],
+    ], resize_keyboard=True, persistent=True)
+
 def kb_chiqim():
     turs = get_chiqim_turs()
     emoji_map = {
@@ -396,10 +406,30 @@ async def start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
     ctx.user_data.clear()
     await update.message.reply_text(
-        '👋 <b>FAMILY ACCOUNTING</b>\n\nNima qilmoqchisiz?',
-        parse_mode='HTML', reply_markup=kb_main()
+        '👋 <b>FAMILY ACCOUNTING</b>\n\nTugmani bosing 👇',
+        parse_mode='HTML', reply_markup=kb_reply_main()
     )
     return ConversationHandler.END
+
+async def handle_reply_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    """Reply keyboard: Chiqim / Kirim tugmalari → conversation boshlaydi"""
+    if not ok(update): return ConversationHandler.END
+    text = update.message.text.strip()
+    ud   = ctx.user_data
+    ud.clear()
+    if 'Chiqim' in text:
+        ud['type'] = 'CHIQIM'; ud['msgs'] = []
+        m = await update.message.reply_text(
+            '📤 <b>CHIQIM</b>\n\nXarajat turini tanlang:',
+            parse_mode='HTML', reply_markup=kb_chiqim())
+        ud['msgs'].append(m.message_id)
+        return TUR
+    ud['type'] = 'KIRIM'; ud['msgs'] = []
+    m = await update.message.reply_text(
+        '📥 <b>KIRIM</b>\n\nKirim turini tanlang:',
+        parse_mode='HTML', reply_markup=kb_kirim())
+    ud['msgs'].append(m.message_id)
+    return TUR
 
 async def hisobot_start(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     q = update.callback_query
@@ -415,7 +445,7 @@ async def hisobot_tip(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     await q.answer()
     d = q.data
     if d == 'BACK':
-        await q.message.reply_text('👋 <b>FAMILY ACCOUNTING</b>',parse_mode='HTML',reply_markup=kb_main())
+        await q.message.reply_text('✅ Bekor qilindi.', reply_markup=kb_reply_main())
         return ConversationHandler.END
     if d.startswith('HT|'):
         ctx.user_data['h']['tip'] = d[3:]
@@ -508,7 +538,7 @@ async def hisobot_tur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 note_str = f' — {r["note"]}' if r.get('note') else ''
                 txt += f"▪️ <b>{r['sana']}</b> | {r['tur']} | {r['egasi']}\n   💰 {sum_str}{note_str}\n"
             txt += f"\n📊 <b>JAMI: {sstr(total_usd, total_uzs)}</b>"
-        await q.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
+        await q.message.reply_text(txt, parse_mode='HTML')
         return ConversationHandler.END
     return H_TUR
 
@@ -524,7 +554,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     if d == 'BACK':
         ud.clear()
-        await q.message.reply_text('👋 <b>FAMILY ACCOUNTING</b>',parse_mode='HTML',reply_markup=kb_main())
+        await q.message.reply_text('✅ Bekor qilindi.', reply_markup=kb_reply_main())
         return ConversationHandler.END
     if d == 'MC':
         ud.clear(); ud['type']='CHIQIM'; ud['msgs']=[]
@@ -537,7 +567,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if d == 'MB':
         await q.message.reply_text('⏳ Balans tekshirilmoqda...')
         bal = get_balance()
-        await q.message.reply_text(f'💰 <b>Joriy balans: {round(bal,2)}$</b>',parse_mode='HTML',reply_markup=kb_main())
+        await q.message.reply_text(f'💰 <b>Joriy balans: {round(bal,2)}$</b>', parse_mode='HTML')
         return ConversationHandler.END
     if d == 'MG':
         await q.message.reply_text("⏳ Ma'lumotlar yuklanmoqda...")
@@ -546,7 +576,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         txt += ('\n'.join(f'  • {c["tur"]}: {sstr(c["usd"],c["uzs"])}' for c in dv['ch'])) or "  Yo'q"
         txt += '\n\n<b>📥 Kirimlar:</b>\n'
         txt += ('\n'.join(f'  • {k["tur"]}: {sstr(k["usd"],k["uzs"])}' for k in dv['ki'])) or "  Yo'q"
-        await q.message.reply_text(txt,parse_mode='HTML',reply_markup=kb_main())
+        await q.message.reply_text(txt, parse_mode='HTML')
         return ConversationHandler.END
     if d == 'MS':
         await q.message.reply_text('⏳ Statistika yuklanmoqda...')
@@ -556,7 +586,7 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                f'💰 Balans: <b>{round(bal,2)}$</b>\n'
                f'Bugungi chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>\n'
                f'Bugungi kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>')
-        await q.message.reply_text(txt,parse_mode='HTML',reply_markup=kb_main())
+        await q.message.reply_text(txt, parse_mode='HTML')
         return ConversationHandler.END
     if d.startswith('C|'):
         ud['tur'] = d[2:]
@@ -624,7 +654,7 @@ async def _finalize(message, ctx):
     try:
         if 'type' not in st or 'tur' not in st:
             ctx.user_data.clear()
-            await message.reply_text('Qaytadan boshlang:',reply_markup=kb_main())
+            await message.reply_text('Qaytadan boshlang.', reply_markup=kb_reply_main())
             return
         m_wait = await message.reply_text('⏳ Saqlanmoqda...')
         save_row(st['type'], st)
@@ -633,13 +663,13 @@ async def _finalize(message, ctx):
         msgs = list(st.get('msgs',[]))
         msgs.append(m_wait.message_id)
         ctx.user_data.clear()
-        await message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
+        await message.reply_text(txt, parse_mode='HTML')
         try: await delete_messages(ctx.application.bot, message.chat_id, msgs)
         except Exception as de: logger.error(f'delete msgs: {de}')
     except Exception as e:
         logger.error(f'finalize: {e}')
         ctx.user_data.clear()
-        await message.reply_text(f'❌ Xato: {e}',reply_markup=kb_main())
+        await message.reply_text(f'❌ Xato: {e}')
 
 # ══════════════════════════════════════════════════════════
 # OUTER TEXT HANDLER — AI edit / QARZ input / Admin input
@@ -647,12 +677,48 @@ async def _finalize(message, ctx):
 async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """ConversationHandler faol bo'lmaganda ishga tushadi"""
     if not ok(update): return
+    # Aktiv holatlar
     if ctx.user_data.get('ai_editing'):
-        await ai_edit_text(update, ctx)
-    elif ctx.user_data.get('qarz_new'):
-        await qarz_input(update, ctx)
-    elif ctx.user_data.get('admin_action'):
-        await admin_text(update, ctx)
+        await ai_edit_text(update, ctx); return
+    if ctx.user_data.get('qarz_new'):
+        await qarz_input(update, ctx); return
+    if ctx.user_data.get('admin_action'):
+        await admin_text(update, ctx); return
+
+    # Reply keyboard routing
+    text = (update.message.text or '').strip()
+    if text == '💰 Balans':
+        bal = get_balance()
+        await update.message.reply_text(f'💰 <b>Joriy balans: {round(bal,2)}$</b>', parse_mode='HTML')
+    elif text == '📅 Bugun':
+        await update.message.reply_text("⏳ Yuklanmoqda...")
+        dv  = get_bugun()
+        txt = f'📅 <b>{today_str()}</b>\n\n<b>📤 Chiqimlar:</b>\n'
+        txt += ('\n'.join(f'  • {c["tur"]}: {sstr(c["usd"],c["uzs"])}' for c in dv['ch'])) or "  Yo'q"
+        txt += '\n\n<b>📥 Kirimlar:</b>\n'
+        txt += ('\n'.join(f'  • {k["tur"]}: {sstr(k["usd"],k["uzs"])}' for k in dv['ki'])) or "  Yo'q"
+        await update.message.reply_text(txt, parse_mode='HTML')
+    elif text == '📊 Statistika':
+        dv  = get_bugun()
+        bal = get_balance()
+        await update.message.reply_text(
+            f'📊 <b>Statistika</b>\n\n'
+            f'💰 Balans: <b>{round(bal,2)}$</b>\n'
+            f'Bugungi chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>\n'
+            f'Bugungi kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>',
+            parse_mode='HTML')
+    elif text == '💳 Qarz':
+        await qarz_cmd(update, ctx)
+    elif text == '✅ Tasklar':
+        await tasks_cmd(update, ctx)
+    elif text == '🧠 Xotira':
+        await memory_cmd(update, ctx)
+    elif text == '🕌 Namoz':
+        await namoz_cmd(update, ctx)
+    elif text == '⚙️ Admin':
+        await admin_cmd(update, ctx)
+    elif text == '❓ Yordam':
+        await help_cmd(update, ctx)
     else:
         await analyze_and_route(update, ctx)
 
@@ -987,7 +1053,7 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if d == 'QARZ_ASOSIY':
-        await q.edit_message_text('👋 <b>FAMILY ACCOUNTING</b>',parse_mode='HTML',reply_markup=kb_main())
+        await q.edit_message_text('✅ Asosiy menyuga qaytildi.', parse_mode='HTML')
         return
 
     if d in ('QARZ_ADD_BER','QARZ_ADD_OL'):
@@ -1300,7 +1366,7 @@ async def admin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if d == 'ADM_MAIN':
-        await q.edit_message_text('👋 <b>FAMILY ACCOUNTING</b>',parse_mode='HTML',reply_markup=kb_main())
+        await q.edit_message_text('✅ Asosiy menyuga qaytildi.', parse_mode='HTML')
         return
 
     if d in ('ADM_CAT_CH','ADM_CAT_KI'):
@@ -1608,12 +1674,12 @@ async def tasks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     try:
         tasks = await asyncio.to_thread(_get)
         if not tasks:
-            await update.message.reply_text("📋 Faol tasklar yo'q.", reply_markup=kb_main())
+            await update.message.reply_text("📋 Faol tasklar yo'q.", reply_markup=kb_reply_main())
             return
         txt = '📋 <b>FAOL TASKLAR:</b>\n\n'
         for t in tasks[:15]:
             txt += f"⏰ <b>{t['vaqt']}</b>  👤 {t['egasi']}\n📝 {t['matn']}\n\n"
-        await update.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
+        await update.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_reply_main())
     except Exception as e:
         await update.message.reply_text(f'❌ Xatolik: {e}')
 
@@ -1791,22 +1857,59 @@ async def ensure_namoz_sheet():
         logger.error(f'ensure_namoz_sheet: {e}')
 
 def _fetch_prayer_times_sync(date_str: str) -> dict:
-    url = (f'https://api.aladhan.com/v1/timings/{date_str}'
-           f'?latitude=41.2995&longitude=69.2401&method=3')
+    # 1. islom.uz (asosiy manba)
     try:
-        req = urllib.request.Request(url, headers={'User-Agent': 'FamilyBot/1.0'})
+        req = urllib.request.Request(
+            'https://islom.uz/api/prayer-times?city=tashkent',
+            headers={'User-Agent': 'FamilyBot/1.0', 'Accept': 'application/json'})
+        with urllib.request.urlopen(req, timeout=8) as resp:
+            data = json.loads(resp.read().decode())
+        uz_map = {
+            'fajr':'bomdod','bomdod':'bomdod','tong':'bomdod','saharlik':'bomdod',
+            'zuhr':'peshin','dhuhr':'peshin','peshin':'peshin','quyosh':'peshin',
+            'asr':'asr',
+            'maghrib':'shom','magrib':'shom','shom':'shom',
+            'isha':'xufton','isha`':'xufton','xufton':'xufton',
+        }
+        result = {}
+        def _extract(d):
+            if isinstance(d, dict):
+                for k, v in d.items():
+                    kl = k.lower().strip("`'\"")
+                    uz = uz_map.get(kl)
+                    if uz and isinstance(v, str) and ':' in v:
+                        result[uz] = v[:5]
+                    elif isinstance(v, (dict, list)):
+                        _extract(v)
+            elif isinstance(d, list):
+                for item in d: _extract(item)
+        _extract(data)
+        if len(result) >= 5:
+            logger.info(f'Namoz vaqtlari islom.uz dan: {result}')
+            return result
+        logger.warning(f'islom.uz kam maydon ({len(result)}): {list(data)[:5]}')
+    except Exception as e:
+        logger.warning(f'islom.uz xato: {e}')
+
+    # 2. aladhan.com (zaxira)
+    try:
+        req = urllib.request.Request(
+            'https://api.aladhan.com/v1/timingsByCity?city=Tashkent&country=UZ&method=3',
+            headers={'User-Agent': 'FamilyBot/1.0'})
         with urllib.request.urlopen(req, timeout=10) as resp:
             data = json.loads(resp.read().decode())
         t = data['data']['timings']
-        return {
+        result = {
             'bomdod': t['Fajr'][:5],
             'peshin': t['Dhuhr'][:5],
             'asr':    t['Asr'][:5],
             'shom':   t['Maghrib'][:5],
             'xufton': t['Isha'][:5],
         }
+        logger.info(f'Namoz vaqtlari aladhan.com (fallback): {result}')
+        return result
     except Exception as e:
-        logger.error(f'_fetch_prayer_times_sync: {e}')
+        logger.error(f'aladhan.com ham ishlamadi: {e}')
         return {}
 
 async def get_prayer_times(date_str: str = None) -> dict:
@@ -2007,6 +2110,9 @@ def main():
         entry_points=[
             CallbackQueryHandler(hisobot_start, pattern='^MH$'),
             CommandHandler('hisobot', hisobot_start_cmd),
+            MessageHandler(
+                filters.Regex('^🔍 Hisobot$') & filters.Chat(chat_id=[int(CHAT_1), int(CHAT_2)]),
+                hisobot_start_cmd),
         ],
         states={
             H_TIP:       [CallbackQueryHandler(hisobot_tip)],
@@ -2021,7 +2127,12 @@ def main():
 
     # ── Asosiy kirim/chiqim conversation ────────────────
     main_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(btn)],
+        entry_points=[
+            CallbackQueryHandler(btn),
+            MessageHandler(
+                filters.Regex('^(📤 Chiqim|📥 Kirim)$') & filters.Chat(chat_id=[int(CHAT_1), int(CHAT_2)]),
+                handle_reply_start),
+        ],
         states={
             TUR:     [CallbackQueryHandler(btn)],
             EGASI:   [CallbackQueryHandler(btn)],
