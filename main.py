@@ -4,7 +4,8 @@ Family Accounting Bot — Kengaytirilgan versiya
 Yangi: AI (rasm+ovoz), QARZ tizimi, Admin panel (kategoriyalar)
 """
 import os, json, logging, base64, asyncio, re
-from datetime import datetime, time as dtime, date
+from datetime import datetime, timedelta, time as dtime, date
+import urllib.request
 from io import BytesIO
 import pytz
 import gspread
@@ -1409,6 +1410,198 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML', reply_markup=kb)
 
 # ══════════════════════════════════════════════════════════
+# NAMOZ TIZIMI
+# ══════════════════════════════════════════════════════════
+NAMOZ_UZ    = ['bomdod', 'peshin', 'asr', 'shom', 'xufton']
+NAMOZ_COL   = {'bomdod': 2, 'peshin': 3, 'asr': 4, 'shom': 5, 'xufton': 6}
+NAMOZ_EMOJI = {'bomdod': '🌅', 'peshin': '☀️', 'asr': '🌤', 'shom': '🌇', 'xufton': '🌙'}
+
+async def ensure_namoz_sheet():
+    try:
+        sh = get_ss()
+        try:
+            sh.worksheet('NAMOZ')
+        except Exception:
+            ws = sh.add_worksheet(title='NAMOZ', rows=1000, cols=8)
+            ws.update('A1:G1', [['sana', 'bomdod', 'peshin', 'asr', 'shom', 'xufton', 'kim']])
+            logger.info("NAMOZ varag'i yaratildi")
+    except Exception as e:
+        logger.error(f'ensure_namoz_sheet: {e}')
+
+def _fetch_prayer_times_sync(date_str: str) -> dict:
+    url = (f'https://api.aladhan.com/v1/timings/{date_str}'
+           f'?latitude=41.2995&longitude=69.2401&method=3')
+    try:
+        req = urllib.request.Request(url, headers={'User-Agent': 'FamilyBot/1.0'})
+        with urllib.request.urlopen(req, timeout=10) as resp:
+            data = json.loads(resp.read().decode())
+        t = data['data']['timings']
+        return {
+            'bomdod': t['Fajr'][:5],
+            'peshin': t['Dhuhr'][:5],
+            'asr':    t['Asr'][:5],
+            'shom':   t['Maghrib'][:5],
+            'xufton': t['Isha'][:5],
+        }
+    except Exception as e:
+        logger.error(f'_fetch_prayer_times_sync: {e}')
+        return {}
+
+async def get_prayer_times(date_str: str = None) -> dict:
+    if not date_str:
+        date_str = datetime.now(TZ).strftime('%d-%m-%Y')
+    return await asyncio.to_thread(_fetch_prayer_times_sync, date_str)
+
+def _parse_prayer_dt(time_str: str, date_obj) -> datetime:
+    h, m = map(int, time_str.split(':')[:2])
+    return TZ.localize(datetime(date_obj.year, date_obj.month, date_obj.day, h, m, 0))
+
+def _save_namoz_sync(sana: str, namoz: str, kim: str, status: str):
+    col_idx  = NAMOZ_COL[namoz]
+    ws       = get_ss().worksheet('NAMOZ')
+    all_vals = ws.get_all_values()
+    target_row = None
+    for i, row in enumerate(all_vals[1:], start=2):
+        if len(row) >= 7 and row[0] == sana and row[6] == kim:
+            target_row = i
+            break
+    if target_row is None:
+        next_row = len(all_vals) + 1
+        ws.update(f'A{next_row}:G{next_row}', [[sana, '', '', '', '', '', kim]])
+        target_row = next_row
+    ws.update_cell(target_row, col_idx, status)
+
+async def save_namoz_response(sana: str, namoz: str, kim: str, status: str):
+    try:
+        await asyncio.to_thread(_save_namoz_sync, sana, namoz, kim, status)
+    except Exception as e:
+        logger.error(f'save_namoz_response: {e}')
+
+async def prayer_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
+    d     = ctx.job.data
+    namoz = d['namoz']
+    vaqt  = d['vaqt']
+    txt = (f"{NAMOZ_EMOJI[namoz]} <b>{namoz.upper()}</b> namozi\n\n"
+           f"⏰ 20 daqiqadan keyin ({vaqt})\nTayyorgarlik ko'ring! 🤲")
+    for cid in [CHAT_1, CHAT_2]:
+        try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
+        except Exception as e: logger.error(f'prayer_reminder {cid}: {e}')
+
+async def prayer_time_job(ctx: ContextTypes.DEFAULT_TYPE):
+    d     = ctx.job.data
+    namoz = d['namoz']
+    vaqt  = d['vaqt']
+    txt = (f"{NAMOZ_EMOJI[namoz]} <b>{namoz.upper()} vaqti kirdi!</b>\n\n"
+           f"🕌 {vaqt} — Alloh qabul qilsin! 🤲")
+    for cid in [CHAT_1, CHAT_2]:
+        try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
+        except Exception as e: logger.error(f'prayer_time {cid}: {e}')
+
+async def prayer_question_job(ctx: ContextTypes.DEFAULT_TYPE):
+    d     = ctx.job.data
+    namoz = d['namoz']
+    sana  = d['sana']
+    for cid, kim in [(CHAT_1, 'FERUDIN'), (CHAT_2, 'GULOYIM')]:
+        kb = InlineKeyboardMarkup([[
+            InlineKeyboardButton("✅ Ha, o'qidim", callback_data=f'NAMOZ_OK_{namoz}_{sana}_{cid}'),
+            InlineKeyboardButton("❌ O'qimadim",   callback_data=f'NAMOZ_NO_{namoz}_{sana}_{cid}'),
+        ]])
+        txt = f"{NAMOZ_EMOJI[namoz]} <b>{namoz.upper()}</b> namozini o'qidingizmi?"
+        try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML', reply_markup=kb)
+        except Exception as e: logger.error(f'prayer_question {cid}: {e}')
+
+async def namoz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    await q.answer()
+    # Format: NAMOZ_OK_bomdod_01.05.2026_1938508551
+    parts = q.data.split('_')
+    if len(parts) < 5:
+        return
+    status_raw = parts[1]   # OK / NO
+    namoz      = parts[2]   # bomdod, peshin, asr, shom, xufton
+    sana       = parts[3]   # 01.05.2026
+    cid        = parts[4]   # chat_id
+    kim    = 'FERUDIN' if cid == CHAT_1 else 'GULOYIM'
+    status = "O'QILDI" if status_raw == 'OK' else "O'QILMADI"
+    icon   = '✅' if status_raw == 'OK' else '❌'
+    await save_namoz_response(sana, namoz, kim, status)
+    await q.edit_message_text(
+        f'{icon} <b>{namoz.upper()}</b> — {status}\n📅 {sana} | 👤 {kim}',
+        parse_mode='HTML')
+
+async def schedule_todays_prayers(app_obj, date_obj=None):
+    if date_obj is None:
+        date_obj = datetime.now(TZ).date()
+    date_str_api = date_obj.strftime('%d-%m-%Y')
+    sana = date_obj.strftime('%d.%m.%Y')
+    times = await get_prayer_times(date_str_api)
+    if not times:
+        logger.error('Namoz vaqtlari olinmadi — API javob bermadi')
+        return
+    now = datetime.now(TZ)
+    for namoz, vaqt_str in times.items():
+        prayer_dt   = _parse_prayer_dt(vaqt_str, date_obj)
+        reminder_dt = prayer_dt - timedelta(minutes=20)
+        question_dt = prayer_dt + timedelta(minutes=15)
+        job_data = {'namoz': namoz, 'vaqt': vaqt_str, 'sana': sana}
+        if reminder_dt > now:
+            app_obj.job_queue.run_once(
+                prayer_reminder_job, when=reminder_dt,
+                data=job_data, name=f'reminder_{namoz}_{sana}')
+        if prayer_dt > now:
+            app_obj.job_queue.run_once(
+                prayer_time_job, when=prayer_dt,
+                data=job_data, name=f'prayer_{namoz}_{sana}')
+        if question_dt > now:
+            app_obj.job_queue.run_once(
+                prayer_question_job, when=question_dt,
+                data=job_data, name=f'question_{namoz}_{sana}')
+    logger.info(f'{sana} namoz vaqtlari scheduled: {times}')
+
+async def daily_prayer_scheduler(ctx: ContextTypes.DEFAULT_TYPE):
+    tomorrow = (datetime.now(TZ) + timedelta(days=1)).date()
+    await schedule_todays_prayers(ctx.application, tomorrow)
+
+async def namoz_weekly_stats(ctx: ContextTypes.DEFAULT_TYPE):
+    try:
+        def _get_stats():
+            ws      = get_ss().worksheet('NAMOZ')
+            vals    = ws.get_all_values()
+            today   = datetime.now(TZ).date()
+            week_ago = today - timedelta(days=7)
+            stats = {
+                'FERUDIN': {n: {'ok': 0, 'no': 0} for n in NAMOZ_UZ},
+                'GULOYIM': {n: {'ok': 0, 'no': 0} for n in NAMOZ_UZ},
+            }
+            for row in vals[1:]:
+                if len(row) < 7: continue
+                try: row_date = datetime.strptime(row[0], '%d.%m.%Y').date()
+                except: continue
+                if row_date < week_ago or row_date > today: continue
+                kim = row[6]
+                if kim not in stats: continue
+                for i, namoz in enumerate(NAMOZ_UZ):
+                    val = row[i + 1] if i + 1 < len(row) else ''
+                    if val == "O'QILDI":     stats[kim][namoz]['ok'] += 1
+                    elif val == "O'QILMADI": stats[kim][namoz]['no'] += 1
+            return stats
+
+        stats = await asyncio.to_thread(_get_stats)
+        txt = '📊 <b>HAFTALIK NAMOZ STATISTIKASI</b>\n\n'
+        for kim, data in stats.items():
+            total_ok = sum(v['ok'] for v in data.values())
+            total_no = sum(v['no'] for v in data.values())
+            txt += f'👤 <b>{kim}</b>\n'
+            for namoz, v in data.items():
+                txt += f'  {NAMOZ_EMOJI[namoz]} {namoz}: ✅{v["ok"]} ❌{v["no"]}\n'
+            txt += f'  📊 Jami: ✅{total_ok}/35 | Qazo: ❌{total_no}\n\n'
+        for cid in [CHAT_1, CHAT_2]:
+            try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
+            except Exception as e: logger.error(f'weekly_stats {cid}: {e}')
+    except Exception as e:
+        logger.error(f'namoz_weekly_stats: {e}')
+
+# ══════════════════════════════════════════════════════════
 # KUNLIK HISOBOT
 # ══════════════════════════════════════════════════════════
 async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
@@ -1439,7 +1632,9 @@ def main():
     async def on_startup(application):
         await load_categories()
         await ensure_qarz()
-        logger.info('Startup: kategoriyalar va QARZ yuklandi')
+        await ensure_namoz_sheet()
+        await schedule_todays_prayers(application)
+        logger.info('Startup: kategoriyalar, QARZ va NAMOZ yuklandi')
     app.post_init = on_startup
 
     # ── Hisobot conversation ─────────────────────────────
@@ -1491,9 +1686,10 @@ def main():
     ))
 
     # AI callback — alohida, ConversationHandler dan tashqarida
-    app.add_handler(CallbackQueryHandler(ai_callback,    pattern='^AI_'))
-    app.add_handler(CallbackQueryHandler(qarz_callback,  pattern='^QARZ_'))
-    app.add_handler(CallbackQueryHandler(admin_callback, pattern='^(ADMIN_|ADM_)'))
+    app.add_handler(CallbackQueryHandler(ai_callback,     pattern='^AI_'))
+    app.add_handler(CallbackQueryHandler(qarz_callback,   pattern='^QARZ_'))
+    app.add_handler(CallbackQueryHandler(admin_callback,  pattern='^(ADMIN_|ADM_)'))
+    app.add_handler(CallbackQueryHandler(namoz_callback,  pattern='^NAMOZ_'))
 
     # Conversation handlers
     app.add_handler(hisobot_conv)
@@ -1507,9 +1703,16 @@ def main():
 
     # Jobs
     app.job_queue.run_daily(daily_report,
-        time=dtime(hour=18, minute=50, tzinfo=pytz.utc))  # 23:50 Tashkent
+        time=dtime(hour=18, minute=50, tzinfo=pytz.utc))   # 23:50 Tashkent
     app.job_queue.run_daily(qarz_notify_job,
-        time=dtime(hour=4, minute=0, tzinfo=pytz.utc))    # 09:00 Tashkent
+        time=dtime(hour=4, minute=0, tzinfo=pytz.utc))     # 09:00 Tashkent
+    # Namoz: har kuni yarim tunda ertangi vaqtlarni olish
+    app.job_queue.run_daily(daily_prayer_scheduler,
+        time=dtime(hour=19, minute=1, tzinfo=pytz.utc))    # 00:01 Tashkent
+    # Haftalik namoz statistikasi — har dushanba 09:05 Tashkent
+    app.job_queue.run_daily(namoz_weekly_stats,
+        time=dtime(hour=4, minute=5, tzinfo=pytz.utc),     # 09:05 Tashkent
+        days=(0,))  # PTB: 0 = dushanba
 
     logger.info('Bot ishga tushdi!')
     app.run_polling(drop_pending_updates=True)
