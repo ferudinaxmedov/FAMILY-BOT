@@ -319,7 +319,7 @@ def kb_reply_main():
         ['💳 Qarz',       '✅ Tasklar'],
         ['🧠 Xotira',     '🕌 Namoz'],
         ['⚙️ Admin',      '❓ Yordam'],
-    ], resize_keyboard=True, persistent=True)
+    ], resize_keyboard=True, is_persistent=True)
 
 def kb_chiqim():
     turs = get_chiqim_turs()
@@ -663,13 +663,13 @@ async def _finalize(message, ctx):
         msgs = list(st.get('msgs',[]))
         msgs.append(m_wait.message_id)
         ctx.user_data.clear()
-        await message.reply_text(txt, parse_mode='HTML')
+        await message.reply_text(txt, parse_mode='HTML', reply_markup=kb_reply_main())
         try: await delete_messages(ctx.application.bot, message.chat_id, msgs)
         except Exception as de: logger.error(f'delete msgs: {de}')
     except Exception as e:
         logger.error(f'finalize: {e}')
         ctx.user_data.clear()
-        await message.reply_text(f'❌ Xato: {e}')
+        await message.reply_text(f'❌ Xato: {e}', reply_markup=kb_reply_main())
 
 # ══════════════════════════════════════════════════════════
 # OUTER TEXT HANDLER — AI edit / QARZ input / Admin input
@@ -687,17 +687,20 @@ async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
     # Reply keyboard routing
     text = (update.message.text or '').strip()
+    kb   = kb_reply_main()
     if text == '💰 Balans':
         bal = get_balance()
-        await update.message.reply_text(f'💰 <b>Joriy balans: {round(bal,2)}$</b>', parse_mode='HTML')
+        await update.message.reply_text(
+            f'💰 <b>Joriy balans: {round(bal,2)}$</b>',
+            parse_mode='HTML', reply_markup=kb)
     elif text == '📅 Bugun':
-        await update.message.reply_text("⏳ Yuklanmoqda...")
+        await update.message.reply_text("⏳ Yuklanmoqda...", reply_markup=kb)
         dv  = get_bugun()
         txt = f'📅 <b>{today_str()}</b>\n\n<b>📤 Chiqimlar:</b>\n'
         txt += ('\n'.join(f'  • {c["tur"]}: {sstr(c["usd"],c["uzs"])}' for c in dv['ch'])) or "  Yo'q"
         txt += '\n\n<b>📥 Kirimlar:</b>\n'
         txt += ('\n'.join(f'  • {k["tur"]}: {sstr(k["usd"],k["uzs"])}' for k in dv['ki'])) or "  Yo'q"
-        await update.message.reply_text(txt, parse_mode='HTML')
+        await update.message.reply_text(txt, parse_mode='HTML', reply_markup=kb)
     elif text == '📊 Statistika':
         dv  = get_bugun()
         bal = get_balance()
@@ -706,7 +709,7 @@ async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             f'💰 Balans: <b>{round(bal,2)}$</b>\n'
             f'Bugungi chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>\n'
             f'Bugungi kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>',
-            parse_mode='HTML')
+            parse_mode='HTML', reply_markup=kb)
     elif text == '💳 Qarz':
         await qarz_cmd(update, ctx)
     elif text == '✅ Tasklar':
@@ -1136,15 +1139,25 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             egasi = 'FERUDIN'
             if tur == 'BERILGAN':
-                # Bergan qarzim QAYTIB KELDI → KIRIM → balans ko'payadi
-                qarz_to_sheet('KIRIM', egasi, summa_usd, summa_uzs,
-                    f'Qarz qaytdi: {kim}')
+                # BERILGAN yopildi → qaytib KELDI → KIRIM (balans +)
+                try:
+                    await asyncio.to_thread(
+                        qarz_to_sheet, 'KIRIM', egasi, summa_usd, summa_uzs,
+                        f'Qarz qaytdi: {kim}')
+                    logger.info(f'QARZ_DONE KIRIM OK: {kim}')
+                except Exception as se:
+                    logger.error(f'QARZ_DONE KIRIM FAILED: {se}')
                 icon   = '✅💰'
                 effect = "Balansga qaytdi (+)"
             else:
-                # Olgan qarzimni QAYTARDIM → CHIQIM → balans kamayadi
-                qarz_to_sheet('CHIQIM', egasi, summa_usd, summa_uzs,
-                    f'Qarz qaytarildi: {kim}')
+                # OLINGAN yopildi → qaytarib BERDIM → CHIQIM (balans -)
+                try:
+                    await asyncio.to_thread(
+                        qarz_to_sheet, 'CHIQIM', egasi, summa_usd, summa_uzs,
+                        f'Qarz qaytarildi: {kim}')
+                    logger.info(f'QARZ_DONE CHIQIM OK: {kim}')
+                except Exception as se:
+                    logger.error(f'QARZ_DONE CHIQIM FAILED: {se}')
                 icon   = '✅💸'
                 effect = "Balansdan ayrildi (−)"
 
@@ -1247,24 +1260,27 @@ async def qarz_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _qarz_save(update, q)
         ctx.user_data.pop('qarz_new', None)
 
-def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str):
-    """Qarz operatsiyasini CHIQIM yoki KIRIM ga yozib balansni yangilaydi"""
+def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str) -> int:
+    """Qarz operatsiyasini CHIQIM yoki KIRIM varag'iga yozib balans yangilaydi."""
     sh    = get_ss().worksheet(sheet_name)
     today = datetime.now(TZ).strftime('%d.%m.%Y')
+    now_t = datetime.now(TZ).strftime('%H:%M')
     col_c = sh.col_values(3)
     last  = 2
     for i, v in enumerate(col_c):
         if i < 2: continue
         if v and str(v).strip(): last = i + 1
     new_row = last + 1
-    now_t = datetime.now(TZ).strftime('%H:%M')
+    usd_w = float(usd_val) if usd_val and str(usd_val).strip() else ''
+    uzs_w = float(uzs_val) if uzs_val and str(uzs_val).strip() else ''
     sh.update(f'B{new_row}:I{new_row}', [[
         new_row - 2, today, egasi, 'BOSHQA', 'CASH',
-        usd_val if usd_val else '',
-        uzs_val if uzs_val else '', now_t
+        usd_w, uzs_w, now_t
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[note]])
-    logger.info(f'qarz_to_sheet → {sheet_name} row {new_row}: {note}')
+    logger.info(
+        f'qarz_to_sheet ✓ → {sheet_name} row={new_row} '
+        f'usd={usd_w} uzs={uzs_w} note="{note}"')
     return new_row
 
 async def _qarz_save(update, q: dict):
@@ -1282,19 +1298,31 @@ async def _qarz_save(update, q: dict):
 
         tur   = q['tur']
         egasi = 'FERUDIN'
+        usd_v = q.get('summa_usd') or ''
+        uzs_v = q.get('summa_uzs') or ''
 
         if tur == 'BERILGAN':
-            # Men qarz BERDIM → CHIQIM → balans kamayadi
-            qarz_to_sheet('CHIQIM', egasi,
-                q.get('summa_usd') or '', q.get('summa_uzs') or '',
-                f"Qarz berildi: {q['kim']}")
+            # BERDIM → CHIQIM (balans kamayadi)
+            try:
+                await asyncio.to_thread(
+                    qarz_to_sheet, 'CHIQIM', egasi, usd_v, uzs_v,
+                    f"Qarz berildi: {q['kim']}")
+                logger.info(f"qarz_to_sheet CHIQIM OK: {q['kim']} usd={usd_v} uzs={uzs_v}")
+            except Exception as se:
+                logger.error(f"qarz_to_sheet CHIQIM FAILED: {se}")
+                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
             icon   = '💸'
             effect = "Balansdan ayrildi (−)"
         else:
-            # Men qarz OLDIM → KIRIM → balans ko'payadi
-            qarz_to_sheet('KIRIM', egasi,
-                q.get('summa_usd') or '', q.get('summa_uzs') or '',
-                f"Qarz olindi: {q['kim']}")
+            # OLDIM → KIRIM (balans ko'payadi)
+            try:
+                await asyncio.to_thread(
+                    qarz_to_sheet, 'KIRIM', egasi, usd_v, uzs_v,
+                    f"Qarz olindi: {q['kim']}")
+                logger.info(f"qarz_to_sheet KIRIM OK: {q['kim']} usd={usd_v} uzs={uzs_v}")
+            except Exception as se:
+                logger.error(f"qarz_to_sheet KIRIM FAILED: {se}")
+                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
             icon   = '💰'
             effect = "Balansga qo'shildi (+)"
 
@@ -1309,9 +1337,11 @@ async def _qarz_save(update, q: dict):
             f'<i>{effect}</i>\n'
             f'💰 Joriy balans: <b>{round(bal, 2)}$</b>'
             + (f'\n📝 {q["note"]}' if q.get('note') else ''),
-            parse_mode='HTML')
+            parse_mode='HTML', reply_markup=kb_reply_main())
     except Exception as e:
-        await update.message.reply_text(f'❌ Qarz saqlashda xatolik: {str(e)[:100]}')
+        await update.message.reply_text(
+            f'❌ Qarz saqlashda xatolik: {str(e)[:100]}',
+            reply_markup=kb_reply_main())
         logger.error(f'_qarz_save: {e}')
 
 # ══════════════════════════════════════════════════════════
@@ -1498,7 +1528,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         '/hisobot — Hisobot filtri\n\n'
         '💡 <i>Rasm yuboring</i> — chek tahlili\n'
         '🎙 <i>Ovoz yuboring</i> — amal / task / xotira',
-        parse_mode='HTML')
+        parse_mode='HTML', reply_markup=kb_reply_main())
 
 async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
@@ -1514,7 +1544,7 @@ async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         emoji  = NAMOZ_EMOJI.get(namoz, '🕌')
         marker = '✅' if vaqt < now_hm else '⏰'
         txt   += f'{marker} {emoji} <b>{namoz.upper()}</b>: {vaqt}\n'
-    await msg.edit_text(txt, parse_mode='HTML')
+    await msg.edit_text(txt, parse_mode='HTML', reply_markup=kb_reply_main())
 
 async def hisobot_start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return ConversationHandler.END
