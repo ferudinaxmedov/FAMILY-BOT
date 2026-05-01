@@ -5,7 +5,6 @@ Yangi: AI (rasm+ovoz), QARZ tizimi, Admin panel (kategoriyalar)
 """
 import os, json, logging, base64, asyncio, re
 from datetime import datetime, timedelta, time as dtime, date
-import urllib.request
 from io import BytesIO
 import pytz
 import gspread
@@ -43,9 +42,11 @@ _cats: dict = {'chiqim': None, 'kirim': None}
 DEFAULT_CHIQIM = [
     'OZIQ OVQAT','BENZIN','RASSROCHKA','KIYIM KECHAK',
     'XURSHIDGA','ISHXONAMGA','UYDAGILARGA','SHTRAFLAR',
-    'SHOPPPING','ISHXONA REG','SARTAROSH','BOSHQA'
+    'SHOPPPING','ISHXONA REG','SARTAROSH','BOSHQA',
+    'QARZ BERILDI','QARZ QAYTARILDI'
 ]
-DEFAULT_KIRIM = ['ISHXONA','SEEDBEE','BUSINESS','UYDAGILAR','BOSHQA']
+DEFAULT_KIRIM = ['ISHXONA','SEEDBEE','BUSINESS','UYDAGILAR','BOSHQA',
+                 'QARZ OLINDI','QARZ QAYTIB KELDI']
 
 def get_chiqim_turs(): return _cats['chiqim'] or DEFAULT_CHIQIM[:]
 def get_kirim_turs():  return _cats['kirim']  or DEFAULT_KIRIM[:]
@@ -1139,22 +1140,20 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
             egasi = 'FERUDIN'
             if tur == 'BERILGAN':
-                # BERILGAN yopildi → qaytib KELDI → KIRIM (balans +)
                 try:
                     await asyncio.to_thread(
                         qarz_to_sheet, 'KIRIM', egasi, summa_usd, summa_uzs,
-                        f'Qarz qaytdi: {kim}')
+                        f'Qarz qaytdi: {kim}', 'QARZ QAYTIB KELDI')
                     logger.info(f'QARZ_DONE KIRIM OK: {kim}')
                 except Exception as se:
                     logger.error(f'QARZ_DONE KIRIM FAILED: {se}')
                 icon   = '✅💰'
                 effect = "Balansga qaytdi (+)"
             else:
-                # OLINGAN yopildi → qaytarib BERDIM → CHIQIM (balans -)
                 try:
                     await asyncio.to_thread(
                         qarz_to_sheet, 'CHIQIM', egasi, summa_usd, summa_uzs,
-                        f'Qarz qaytarildi: {kim}')
+                        f'Qarz qaytarildi: {kim}', 'QARZ QAYTARILDI')
                     logger.info(f'QARZ_DONE CHIQIM OK: {kim}')
                 except Exception as se:
                     logger.error(f'QARZ_DONE CHIQIM FAILED: {se}')
@@ -1260,7 +1259,10 @@ async def qarz_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _qarz_save(update, q)
         ctx.user_data.pop('qarz_new', None)
 
-def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str) -> int:
+def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str, tur: str = None) -> int:
+    if tur is None:
+        tur = 'QARZ BERILDI' if sheet_name == 'CHIQIM' else 'QARZ OLINDI'
+
     sh    = get_ss().worksheet(sheet_name)
     today = datetime.now(TZ).strftime('%d.%m.%Y')
     col_c = sh.col_values(3)
@@ -1270,18 +1272,17 @@ def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str) -> i
         if v and str(v).strip(): last = i + 1
     new_row = last + 1
 
-    try: usd = float(usd_val) if usd_val and str(usd_val).strip() not in ('', '0', '0.0') else ''
+    try: usd = float(usd_val) if usd_val is not None and str(usd_val).strip() not in ('', '0', '0.0') else ''
     except: usd = ''
-    try: uzs = float(uzs_val) if uzs_val and str(uzs_val).strip() not in ('', '0', '0.0') else ''
+    try: uzs = float(uzs_val) if uzs_val is not None and str(uzs_val).strip() not in ('', '0', '0.0') else ''
     except: uzs = ''
 
-    logger.info(f'qarz_to_sheet: {sheet_name} | usd={usd} | uzs={uzs} | note={note}')
-
+    logger.info(f'qarz_to_sheet: {sheet_name} | tur={tur} | usd={usd} | uzs={uzs}')
     sh.update(f'B{new_row}:H{new_row}', [[
-        new_row - 2, today, egasi, 'BOSHQA', 'CASH', usd, uzs
+        new_row - 2, today, egasi, tur, 'CASH', usd, uzs
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[note]])
-    logger.info(f'qarz_to_sheet SAQLANDI: {sheet_name} row {new_row}')
+    logger.info(f'SAQLANDI: {sheet_name} row {new_row}')
     return new_row
 
 async def _qarz_save(update, q: dict):
@@ -1303,22 +1304,20 @@ async def _qarz_save(update, q: dict):
         uzs_v = q.get('summa_uzs') or None
 
         if tur == 'BERILGAN':
-            # BERDIM → CHIQIM (balans kamayadi)
             try:
                 await asyncio.to_thread(
                     qarz_to_sheet, 'CHIQIM', egasi, usd_v, uzs_v,
-                    f"Qarz berildi: {q['kim']}")
+                    f"Qarz berildi: {q['kim']}", 'QARZ BERILDI')
             except Exception as se:
                 logger.error(f"qarz_to_sheet CHIQIM FAILED: {se}")
                 await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
             icon   = '💸'
             effect = "Balansdan ayrildi (−)"
         else:
-            # OLDIM → KIRIM (balans ko'payadi)
             try:
                 await asyncio.to_thread(
                     qarz_to_sheet, 'KIRIM', egasi, usd_v, uzs_v,
-                    f"Qarz olindi: {q['kim']}")
+                    f"Qarz olindi: {q['kim']}", 'QARZ OLINDI')
             except Exception as se:
                 logger.error(f"qarz_to_sheet KIRIM FAILED: {se}")
                 await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
@@ -1532,7 +1531,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
     msg = await update.message.reply_text('⏳ Namoz vaqtlari yuklanmoqda...')
-    times = await get_prayer_times(datetime.now(TZ).date())
+    times = get_prayer_times(datetime.now(TZ).date())
     if not times:
         await msg.edit_text('❌ Namoz vaqtlari olinmadi. Internet yoki API muammosi.')
         return
@@ -1885,61 +1884,35 @@ async def ensure_namoz_sheet():
     except Exception as e:
         logger.error(f'ensure_namoz_sheet: {e}')
 
-async def get_prayer_times(target_date=None) -> dict:
-    """Namoz vaqtlarini olish: namoz-vaqtlari.more-info.uz → islomapi.uz (zaxira)"""
-    import ssl
+def get_prayer_times(target_date=None) -> dict:
+    """Toshkent namoz vaqtlari — O'zbekiston Musulmonlari Idorasi 2026 jadvali."""
     if target_date is None:
         target_date = datetime.now(TZ).date()
     elif isinstance(target_date, str):
-        # eski chaqiruvlar uchun backward compat
-        try:
-            target_date = datetime.strptime(target_date, '%d-%m-%Y').date()
-        except Exception:
-            target_date = datetime.now(TZ).date()
-    date_str = target_date.strftime('%Y-%m-%d')
+        try: target_date = datetime.strptime(target_date, '%d-%m-%Y').date()
+        except: target_date = datetime.now(TZ).date()
 
-    ssl_ctx = ssl.create_default_context()
-    ssl_ctx.check_hostname = False
-    ssl_ctx.verify_mode    = ssl.CERT_NONE
-
-    # 1. namoz-vaqtlari.more-info.uz
-    try:
-        url = f'https://namoz-vaqtlari.more-info.uz:444/api/GetDailyPrayTimes/Toshkent/{date_str}'
-        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
-            data = json.loads(r.read())
-        if data.get('isSuccess') and data.get('response'):
-            resp = data['response']
-            result = {
-                'bomdod': str(resp.get('bomdod', '?'))[:5],
-                'peshin': str(resp.get('peshin', '?'))[:5],
-                'asr':    str(resp.get('asr',    '?'))[:5],
-                'shom':   str(resp.get('shom',   '?'))[:5],
-                'xufton': str(resp.get('xufton', '?'))[:5],
-            }
-            logger.info(f'Namoz vaqtlari more-info.uz dan: {result}')
-            return result
-    except Exception as e:
-        logger.error(f'Namoz API 1 xato: {e}')
-
-    # 2. islomapi.uz (zaxira)
-    try:
-        url2 = 'https://islomapi.uz/api/present/day?region=Toshkent'
-        req2 = urllib.request.Request(url2, headers={'User-Agent': 'Mozilla/5.0'})
-        with urllib.request.urlopen(req2, timeout=15) as r2:
-            data2 = json.loads(r2.read())
-        result = {
-            'bomdod': str(data2.get('Bomdod', '?'))[:5],
-            'peshin': str(data2.get('Peshin', '?'))[:5],
-            'asr':    str(data2.get('Asr',    '?'))[:5],
-            'shom':   str(data2.get('Shom',   '?'))[:5],
-            'xufton': str(data2.get('Xufton', '?'))[:5],
-        }
-        logger.info(f'Namoz vaqtlari islomapi.uz (fallback): {result}')
-        return result
-    except Exception as e:
-        logger.error(f'Namoz API 2 xato: {e}')
-        return None
+    month = target_date.month
+    # [Bomdod, Peshin, Asr, Shom, Xufton]
+    TASHKENT = {
+        1:  ['06:30','13:01','15:42','17:38','19:00'],
+        2:  ['06:10','13:03','16:10','18:08','19:30'],
+        3:  ['05:35','13:00','16:38','18:37','20:00'],
+        4:  ['04:52','12:53','17:03','19:06','20:30'],
+        5:  ['04:17','12:47','17:26','19:33','21:00'],
+        6:  ['03:58','12:49','17:40','19:54','21:22'],
+        7:  ['04:10','12:55','17:38','19:52','21:18'],
+        8:  ['04:40','12:55','17:17','19:29','20:50'],
+        9:  ['05:12','12:47','16:43','18:53','20:10'],
+        10: ['05:43','12:38','16:05','18:15','19:35'],
+        11: ['06:15','12:35','15:33','17:37','19:00'],
+        12: ['06:35','12:47','15:25','17:25','18:50'],
+    }
+    t = TASHKENT.get(month, TASHKENT[5])
+    return {
+        'bomdod': t[0], 'peshin': t[1], 'asr': t[2],
+        'shom':   t[3], 'xufton': t[4],
+    }
 
 def _parse_prayer_dt(time_str: str, date_obj) -> datetime:
     h, m = map(int, time_str.split(':')[:2])
@@ -2022,7 +1995,7 @@ async def schedule_todays_prayers(app_obj, date_obj=None):
     if date_obj is None:
         date_obj = datetime.now(TZ).date()
     sana  = date_obj.strftime('%d.%m.%Y')
-    times = await get_prayer_times(date_obj)
+    times = get_prayer_times(date_obj)
     if not times:
         logger.error('Namoz vaqtlari olinmadi — API javob bermadi')
         return
@@ -2469,23 +2442,20 @@ def qarz_close_api(row_index: int):
         row       = ws.row_values(row_index)
         tur       = row[1] if len(row) > 1 else 'BERILGAN'
         kim       = row[2] if len(row) > 2 else '?'
-        summa_uzs = row[3] if len(row) > 3 and row[3] else ''
-        summa_usd = row[4] if len(row) > 4 and row[4] else ''
+        summa_uzs = row[3] if len(row) > 3 and row[3] and str(row[3]).strip() else None
+        summa_usd = row[4] if len(row) > 4 and row[4] and str(row[4]).strip() else None
 
-        # QARZ ni TUGADI deb belgilash
         ws.update_cell(row_index, 8, 'TUGADI')
         ws.update_cell(row_index, 9, today)
 
         egasi = 'FERUDIN'
         if tur == 'BERILGAN':
-            # Bergan qarzim qaytdi → KIRIM (balans +)
             qarz_to_sheet('KIRIM', egasi, summa_usd, summa_uzs,
-                f'Qarz qaytdi: {kim}')
+                f'Qarz qaytdi: {kim}', 'QARZ QAYTIB KELDI')
             effect = 'balance_plus'
         else:
-            # Olgan qarzimni qaytardim → CHIQIM (balans −)
             qarz_to_sheet('CHIQIM', egasi, summa_usd, summa_uzs,
-                f'Qarz qaytarildi: {kim}')
+                f'Qarz qaytarildi: {kim}', 'QARZ QAYTARILDI')
             effect = 'balance_minus'
 
         bal = get_balance()
