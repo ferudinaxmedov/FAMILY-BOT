@@ -1533,7 +1533,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
     msg = await update.message.reply_text('⏳ Namoz vaqtlari yuklanmoqda...')
-    times = await get_prayer_times(datetime.now(TZ).strftime('%d-%m-%Y'))
+    times = await get_prayer_times(datetime.now(TZ).date())
     if not times:
         await msg.edit_text('❌ Namoz vaqtlari olinmadi. Internet yoki API muammosi.')
         return
@@ -1886,66 +1886,61 @@ async def ensure_namoz_sheet():
     except Exception as e:
         logger.error(f'ensure_namoz_sheet: {e}')
 
-def _fetch_prayer_times_sync(date_str: str) -> dict:
-    # 1. islom.uz (asosiy manba)
-    try:
-        req = urllib.request.Request(
-            'https://islom.uz/api/prayer-times?city=tashkent',
-            headers={'User-Agent': 'FamilyBot/1.0', 'Accept': 'application/json'})
-        with urllib.request.urlopen(req, timeout=8) as resp:
-            data = json.loads(resp.read().decode())
-        uz_map = {
-            'fajr':'bomdod','bomdod':'bomdod','tong':'bomdod','saharlik':'bomdod',
-            'zuhr':'peshin','dhuhr':'peshin','peshin':'peshin','quyosh':'peshin',
-            'asr':'asr',
-            'maghrib':'shom','magrib':'shom','shom':'shom',
-            'isha':'xufton','isha`':'xufton','xufton':'xufton',
-        }
-        result = {}
-        def _extract(d):
-            if isinstance(d, dict):
-                for k, v in d.items():
-                    kl = k.lower().strip("`'\"")
-                    uz = uz_map.get(kl)
-                    if uz and isinstance(v, str) and ':' in v:
-                        result[uz] = v[:5]
-                    elif isinstance(v, (dict, list)):
-                        _extract(v)
-            elif isinstance(d, list):
-                for item in d: _extract(item)
-        _extract(data)
-        if len(result) >= 5:
-            logger.info(f'Namoz vaqtlari islom.uz dan: {result}')
-            return result
-        logger.warning(f'islom.uz kam maydon ({len(result)}): {list(data)[:5]}')
-    except Exception as e:
-        logger.warning(f'islom.uz xato: {e}')
+async def get_prayer_times(target_date=None) -> dict:
+    """Namoz vaqtlarini olish: namoz-vaqtlari.more-info.uz → islomapi.uz (zaxira)"""
+    import ssl
+    if target_date is None:
+        target_date = datetime.now(TZ).date()
+    elif isinstance(target_date, str):
+        # eski chaqiruvlar uchun backward compat
+        try:
+            target_date = datetime.strptime(target_date, '%d-%m-%Y').date()
+        except Exception:
+            target_date = datetime.now(TZ).date()
+    date_str = target_date.strftime('%Y-%m-%d')
 
-    # 2. aladhan.com (zaxira)
+    ssl_ctx = ssl.create_default_context()
+    ssl_ctx.check_hostname = False
+    ssl_ctx.verify_mode    = ssl.CERT_NONE
+
+    # 1. namoz-vaqtlari.more-info.uz
     try:
-        req = urllib.request.Request(
-            'https://api.aladhan.com/v1/timingsByCity?city=Tashkent&country=UZ&method=3',
-            headers={'User-Agent': 'FamilyBot/1.0'})
-        with urllib.request.urlopen(req, timeout=10) as resp:
-            data = json.loads(resp.read().decode())
-        t = data['data']['timings']
+        url = f'https://namoz-vaqtlari.more-info.uz:444/api/GetDailyPrayTimes/Toshkent/{date_str}'
+        req = urllib.request.Request(url, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req, timeout=15, context=ssl_ctx) as r:
+            data = json.loads(r.read())
+        if data.get('isSuccess') and data.get('response'):
+            resp = data['response']
+            result = {
+                'bomdod': str(resp.get('bomdod', '?'))[:5],
+                'peshin': str(resp.get('peshin', '?'))[:5],
+                'asr':    str(resp.get('asr',    '?'))[:5],
+                'shom':   str(resp.get('shom',   '?'))[:5],
+                'xufton': str(resp.get('xufton', '?'))[:5],
+            }
+            logger.info(f'Namoz vaqtlari more-info.uz dan: {result}')
+            return result
+    except Exception as e:
+        logger.error(f'Namoz API 1 xato: {e}')
+
+    # 2. islomapi.uz (zaxira)
+    try:
+        url2 = 'https://islomapi.uz/api/present/day?region=Toshkent'
+        req2 = urllib.request.Request(url2, headers={'User-Agent': 'Mozilla/5.0'})
+        with urllib.request.urlopen(req2, timeout=15) as r2:
+            data2 = json.loads(r2.read())
         result = {
-            'bomdod': t['Fajr'][:5],
-            'peshin': t['Dhuhr'][:5],
-            'asr':    t['Asr'][:5],
-            'shom':   t['Maghrib'][:5],
-            'xufton': t['Isha'][:5],
+            'bomdod': str(data2.get('Bomdod', '?'))[:5],
+            'peshin': str(data2.get('Peshin', '?'))[:5],
+            'asr':    str(data2.get('Asr',    '?'))[:5],
+            'shom':   str(data2.get('Shom',   '?'))[:5],
+            'xufton': str(data2.get('Xufton', '?'))[:5],
         }
-        logger.info(f'Namoz vaqtlari aladhan.com (fallback): {result}')
+        logger.info(f'Namoz vaqtlari islomapi.uz (fallback): {result}')
         return result
     except Exception as e:
-        logger.error(f'aladhan.com ham ishlamadi: {e}')
-        return {}
-
-async def get_prayer_times(date_str: str = None) -> dict:
-    if not date_str:
-        date_str = datetime.now(TZ).strftime('%d-%m-%Y')
-    return await asyncio.to_thread(_fetch_prayer_times_sync, date_str)
+        logger.error(f'Namoz API 2 xato: {e}')
+        return None
 
 def _parse_prayer_dt(time_str: str, date_obj) -> datetime:
     h, m = map(int, time_str.split(':')[:2])
@@ -2027,9 +2022,8 @@ async def namoz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def schedule_todays_prayers(app_obj, date_obj=None):
     if date_obj is None:
         date_obj = datetime.now(TZ).date()
-    date_str_api = date_obj.strftime('%d-%m-%Y')
-    sana = date_obj.strftime('%d.%m.%Y')
-    times = await get_prayer_times(date_str_api)
+    sana  = date_obj.strftime('%d.%m.%Y')
+    times = await get_prayer_times(date_obj)
     if not times:
         logger.error('Namoz vaqtlari olinmadi — API javob bermadi')
         return
