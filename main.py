@@ -88,19 +88,21 @@ def get_balance():
         return 0.0
 
 def save_row(sheet_name, st):
-    sh      = get_ss().worksheet(sheet_name)
-    today   = datetime.now(TZ).strftime('%d.%m.%Y')
-    usd_val = float(st['summa']) if st['valyuta'] == 'USD' else ''
-    uzs_val = float(st['summa']) if st['valyuta'] == 'UZS' else ''
-    col_c   = sh.col_values(3)
-    last    = 2
+    sh       = get_ss().worksheet(sheet_name)
+    now_dt   = datetime.now(TZ)
+    today    = now_dt.strftime('%d.%m.%Y')
+    now_t    = now_dt.strftime('%H:%M')
+    usd_val  = float(st['summa']) if st['valyuta'] == 'USD' else ''
+    uzs_val  = float(st['summa']) if st['valyuta'] == 'UZS' else ''
+    col_c    = sh.col_values(3)
+    last     = 2
     for i, v in enumerate(col_c):
         if i < 2: continue
         if v and str(v).strip(): last = i + 1
     new_row = last + 1
-    sh.update(f'B{new_row}:H{new_row}', [[
+    sh.update(f'B{new_row}:I{new_row}', [[
         new_row-2, today, st['egasi'], st['tur'],
-        st['tolov'], usd_val, uzs_val
+        st['tolov'], usd_val, uzs_val, now_t
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[st.get('note','')]])
     logger.info(f'Saved to {sheet_name} row {new_row}')
@@ -940,9 +942,10 @@ async def _ai_save(query, ctx, pending: dict, uid: int):
         uzs    = data.get('summa_uzs') or ''
         note   = data.get('note','')
 
-        ws.update(f'B{new_row}:H{new_row}', [[
+        now_t = datetime.now(TZ).strftime('%H:%M')
+        ws.update(f'B{new_row}:I{new_row}', [[
             new_row-2, sana, egasi, tur, tolov,
-            usd if usd else '', uzs if uzs else ''
+            usd if usd else '', uzs if uzs else '', now_t
         ]], value_input_option='USER_ENTERED')
         ws.update(f'J{new_row}', [[note]])
 
@@ -1188,10 +1191,11 @@ def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str):
         if i < 2: continue
         if v and str(v).strip(): last = i + 1
     new_row = last + 1
-    sh.update(f'B{new_row}:H{new_row}', [[
+    now_t = datetime.now(TZ).strftime('%H:%M')
+    sh.update(f'B{new_row}:I{new_row}', [[
         new_row - 2, today, egasi, 'BOSHQA', 'CASH',
         usd_val if usd_val else '',
-        uzs_val if uzs_val else '',
+        uzs_val if uzs_val else '', now_t
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[note]])
     logger.info(f'qarz_to_sheet → {sheet_name} row {new_row}: {note}')
@@ -1414,6 +1418,46 @@ async def admin_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════
 # BOSHQA KOMANDALAR
 # ══════════════════════════════════════════════════════════
+async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    await update.message.reply_text(
+        '📚 <b>Barcha komandalar:</b>\n\n'
+        '/start — Asosiy menyu\n'
+        '/qarz — Qarz tizimi\n'
+        '/tasks — Bugungi vazifalar\n'
+        '/memory — Xotiradan qidirish\n'
+        '/namoz — Bugungi namoz vaqtlari\n'
+        '/admin — Kategoriyalar boshqaruvi\n'
+        '/debug — Tizim holati\n'
+        '/hisobot — Hisobot filtri\n\n'
+        '💡 <i>Rasm yuboring</i> — chek tahlili\n'
+        '🎙 <i>Ovoz yuboring</i> — amal / task / xotira',
+        parse_mode='HTML')
+
+async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    msg = await update.message.reply_text('⏳ Namoz vaqtlari yuklanmoqda...')
+    times = await get_prayer_times(datetime.now(TZ).strftime('%d-%m-%Y'))
+    if not times:
+        await msg.edit_text('❌ Namoz vaqtlari olinmadi. Internet yoki API muammosi.')
+        return
+    now_hm = datetime.now(TZ).strftime('%H:%M')
+    sana   = datetime.now(TZ).strftime('%d.%m.%Y')
+    txt    = f'🕌 <b>Namoz vaqtlari — {sana}</b>\n\n'
+    for namoz, vaqt in times.items():
+        emoji  = NAMOZ_EMOJI.get(namoz, '🕌')
+        marker = '✅' if vaqt < now_hm else '⏰'
+        txt   += f'{marker} {emoji} <b>{namoz.upper()}</b>: {vaqt}\n'
+    await msg.edit_text(txt, parse_mode='HTML')
+
+async def hisobot_start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return ConversationHandler.END
+    ctx.user_data['h'] = {}
+    await update.message.reply_text(
+        '🔍 <b>HISOBOT</b>\n\nAmal turini tanlang:',
+        parse_mode='HTML', reply_markup=kb_h_tip())
+    return H_TIP
+
 async def debug_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
     try:
@@ -1960,7 +2004,10 @@ def main():
 
     # ── Hisobot conversation ─────────────────────────────
     hisobot_conv = ConversationHandler(
-        entry_points=[CallbackQueryHandler(hisobot_start, pattern='^MH$')],
+        entry_points=[
+            CallbackQueryHandler(hisobot_start, pattern='^MH$'),
+            CommandHandler('hisobot', hisobot_start_cmd),
+        ],
         states={
             H_TIP:       [CallbackQueryHandler(hisobot_tip)],
             H_DAVR:      [CallbackQueryHandler(hisobot_davr)],
@@ -1997,6 +2044,8 @@ def main():
     app.add_handler(CommandHandler('admin',  admin_cmd))
     app.add_handler(CommandHandler('tasks',  tasks_cmd))
     app.add_handler(CommandHandler('memory', memory_cmd))
+    app.add_handler(CommandHandler('namoz',  namoz_cmd))
+    app.add_handler(CommandHandler('help',   help_cmd))
 
     # AI handlers (photo + voice) — ConversationHandler dan OLDIN
     app.add_handler(MessageHandler(
@@ -2086,6 +2135,7 @@ def read_sheet(sheet_name: str):
             'tur':   row[4] if len(row)>4 else '',
             'tolov': row[5] if len(row)>5 else '',
             'usd':   usd, 'uzs': uzs,
+            'vaqt':  row[8] if len(row)>8 and row[8] else '',
             'note':  row[9] if len(row)>9 else '',
         })
     return result
@@ -2210,9 +2260,10 @@ def add_transaction(tx: Transaction):
     try:
         ss=get_ss(); sh=ss.worksheet(tx.type)
         nr=find_next_row(sh)
-        usd=tx.summa if tx.valyuta=='USD' else ''
-        uzs=tx.summa if tx.valyuta=='UZS' else ''
-        sh.update(f'B{nr}:H{nr}',[[nr-2,tx.sana,tx.egasi,tx.tur,tx.tolov,usd,uzs]])
+        usd   = tx.summa if tx.valyuta=='USD' else ''
+        uzs   = tx.summa if tx.valyuta=='UZS' else ''
+        now_t = datetime.now(TZ).strftime('%H:%M')
+        sh.update(f'B{nr}:I{nr}',[[nr-2,tx.sana,tx.egasi,tx.tur,tx.tolov,usd,uzs,now_t]])
         sh.update(f'J{nr}',[[tx.note or '']])
         return {'success':True,'row':nr,'message':'Saqlandi'}
     except Exception as e: raise HTTPException(500, str(e))
