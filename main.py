@@ -961,7 +961,7 @@ async def ai_edit_text(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """AI natijasini matn orqali tahrirlash"""
     uid = update.effective_user.id
     if uid not in pending_ai:
-        await update.message.reply_text('❌ Tahrirlash sessiyasi tugadi. Qayta yuboring.')
+        await update.message.reply_text('❌ Tahrirlash sessiyasi tugadi. Qayta yuboring.', reply_markup=kb_reply_main())
         ctx.user_data.pop('ai_editing', None)
         return
 
@@ -1310,7 +1310,7 @@ async def _qarz_save(update, q: dict):
                     f"Qarz berildi: {q['kim']}", 'QARZ BERILDI')
             except Exception as se:
                 logger.error(f"qarz_to_sheet CHIQIM FAILED: {se}")
-                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
+                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}', reply_markup=kb_reply_main())
             icon   = '💸'
             effect = "Balansdan ayrildi (−)"
         else:
@@ -1320,7 +1320,7 @@ async def _qarz_save(update, q: dict):
                     f"Qarz olindi: {q['kim']}", 'QARZ OLINDI')
             except Exception as se:
                 logger.error(f"qarz_to_sheet KIRIM FAILED: {se}")
-                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}')
+                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}', reply_markup=kb_reply_main())
             icon   = '💰'
             effect = "Balansga qo'shildi (+)"
 
@@ -1530,19 +1530,15 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
-    msg = await update.message.reply_text('⏳ Namoz vaqtlari yuklanmoqda...')
-    times = get_prayer_times(datetime.now(TZ).date())
-    if not times:
-        await msg.edit_text('❌ Namoz vaqtlari olinmadi. Internet yoki API muammosi.')
-        return
+    times  = get_prayer_times(datetime.now(TZ).date())
     now_hm = datetime.now(TZ).strftime('%H:%M')
     sana   = datetime.now(TZ).strftime('%d.%m.%Y')
     txt    = f'🕌 <b>Namoz vaqtlari — {sana}</b>\n\n'
-    for namoz, vaqt in times.items():
+    for namoz, vaqt in (times or {}).items():
         emoji  = NAMOZ_EMOJI.get(namoz, '🕌')
         marker = '✅' if vaqt < now_hm else '⏰'
         txt   += f'{marker} {emoji} <b>{namoz.upper()}</b>: {vaqt}\n'
-    await msg.edit_text(txt, parse_mode='HTML', reply_markup=kb_reply_main())
+    await update.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_reply_main())
 
 async def hisobot_start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return ConversationHandler.END
@@ -1559,9 +1555,9 @@ async def debug_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         rows = get_ss().worksheet('CHIQIM').get_all_values()
         lines = [f'Balance: {bal}', f'CHIQIM: {len(rows)} qator',
                  f'Kategoriyalar: {len(get_chiqim_turs())} ta']
-        await update.message.reply_text('\n'.join(lines))
+        await update.message.reply_text('\n'.join(lines), reply_markup=kb_reply_main())
     except Exception as e:
-        await update.message.reply_text(f'Xato: {e}')
+        await update.message.reply_text(f'Xato: {e}', reply_markup=kb_reply_main())
 
 async def qarz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
