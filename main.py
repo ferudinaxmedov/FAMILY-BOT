@@ -651,6 +651,8 @@ async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await qarz_input(update, ctx)
     elif ctx.user_data.get('admin_action'):
         await admin_text(update, ctx)
+    else:
+        await analyze_and_route(update, ctx)
 
 # ══════════════════════════════════════════════════════════
 # AI — RASM (PHOTO) HANDLER
@@ -715,73 +717,111 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # AI — OVOZLI XABAR (VOICE) HANDLER
 # ══════════════════════════════════════════════════════════
 async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Ovozli xabar → Whisper → Claude → tasdiqlash"""
+    """Ovozli xabar → Whisper → Claude → accounting/task/memory/suhbat"""
     if not ok(update): return
     msg = await update.message.reply_text('🎙 Ovoz qayta ishlanmoqda...')
     try:
         if not OPENAI_API_KEY:
-            await msg.edit_text('❌ OPENAI_API_KEY Railway Variables ga qo\'shilmagan.')
+            await msg.edit_text("❌ OPENAI_API_KEY Railway Variables ga qo'shilmagan.")
             return
         if not ANTHROPIC_API_KEY:
-            await msg.edit_text('❌ ANTHROPIC_API_KEY Railway Variables ga qo\'shilmagan.')
+            await msg.edit_text("❌ ANTHROPIC_API_KEY Railway Variables ga qo'shilmagan.")
             return
         import openai as oai
         import anthropic
 
-        # Ovoz yuklab olish
-        voice   = update.message.voice or update.message.audio
-        tg_file = await ctx.bot.get_file(voice.file_id)
-        fb      = await tg_file.download_as_bytearray()
+        voice    = update.message.voice or update.message.audio
+        tg_file  = await ctx.bot.get_file(voice.file_id)
+        fb       = await tg_file.download_as_bytearray()
         audio_io = BytesIO(bytes(fb))
         audio_io.name = 'voice.ogg'
 
-        # Whisper: ovoz → matn
         oai_client = oai.OpenAI(api_key=OPENAI_API_KEY)
         transcript = await asyncio.to_thread(
             oai_client.audio.transcriptions.create,
-            model='whisper-1',
-            file=audio_io,
-            language='uz'
-        )
+            model='whisper-1', file=audio_io, language='uz')
         voice_text = transcript.text.strip()
         await msg.edit_text(
-            f'🎙 Matnga aylandi:\n<i>{voice_text}</i>\n\n⏳ Tahlil qilinmoqda...',
-            parse_mode='HTML')
+            f'🎙 <i>{voice_text}</i>\n\n⏳ Tahlil qilinmoqda...', parse_mode='HTML')
 
-        # Claude: matni tahlil qilish
-        chiqim_list = ', '.join(get_chiqim_turs())
-        kirim_list  = ', '.join(get_kirim_turs())
-        today       = today_str()
-        claude      = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        cid    = str(update.effective_chat.id)
+        kim    = 'FERUDIN' if cid == CHAT_1 else 'GULOYIM'
+        today  = today_str()
+        now_hm = datetime.now(TZ).strftime('%H:%M')
+        ch_lst = ', '.join(get_chiqim_turs())
+        ki_lst = ', '.join(get_kirim_turs())
+        claude = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
 
         resp = await asyncio.to_thread(
             claude.messages.create,
             model='claude-opus-4-5',
             max_tokens=512,
-            messages=[{
-                'role': 'user',
-                'content': (
-                    f'Oilaviy moliyaviy hisobdorlik uchun ovozli xabardan olingan matn:\n'
-                    f'"{voice_text}"\n\n'
-                    f'Faqat JSON qaytargin:\n'
-                    f'{{"operatsiya":"<CHIQIM yoki KIRIM>",'
-                    f'"summa_uzs":<UZS son yoki null>,'
-                    f'"summa_usd":<USD son yoki null>,'
-                    f'"sana":"<DD.MM.YYYY, aytilmasa {today}>","tur":"<CHIQIM: {chiqim_list} | KIRIM: {kirim_list}>","egasi":"<FERUDIN yoki GULOYIM>","tolov":"<NAQD yoki KARTA>","note":"<qisqacha izoh>"}}'
-                )
-            }]
-        )
-        raw  = resp.content[0].text.strip()
-        raw  = re.sub(r'```(?:json)?\s*','',raw).strip('`').strip()
+            messages=[{'role': 'user', 'content': (
+                f'Ovozli xabar: "{voice_text}"\nBugun: {today} {now_hm} Toshkent\n\n'
+                f'Faqat JSON qaytargin:\n'
+                f'{{"intent":"<CHIQIM|KIRIM|TASK|MEMORY_SAVE|MEMORY_QUERY|SUHBAT>",'
+                f'"operatsiya":"<CHIQIM|KIRIM|null>",'
+                f'"summa_uzs":<son|null>,"summa_usd":<son|null>,'
+                f'"sana":"<DD.MM.YYYY>","tur":"<{ch_lst}|{ki_lst}>",'
+                f'"egasi":"<FERUDIN|GULOYIM>","tolov":"<NAQD|KARTA>","note":"<izoh>",'
+                f'"task_matn":"<null|vazifa>","task_vaqt":"<null|DD.MM.YYYY HH:MM>",'
+                f'"task_egasi":"<FERUDIN|GULOYIM|IKKALASI>",'
+                f'"memory_kalit":"<null|kalit>","memory_qiymat":"<null|qiymat>"}}'
+            )}])
+        raw  = re.sub(r'```(?:json)?\s*', '', resp.content[0].text.strip()).strip('`').strip()
         data = json.loads(raw)
-        op   = data.get('operatsiya','CHIQIM').lower()
+        intent = data.get('intent', 'SUHBAT')
 
-        uid = update.effective_user.id
-        pending_ai[uid] = {'op_type': op, 'data': data, 'source': 'voice', 'voice_text': voice_text}
-        await msg.edit_text(_fmt_ai(data, op), parse_mode='HTML', reply_markup=kb_ai_confirm())
+        if intent in ('CHIQIM', 'KIRIM'):
+            op  = intent.lower()
+            uid = update.effective_user.id
+            pending_ai[uid] = {'op_type': op, 'data': data, 'source': 'voice', 'voice_text': voice_text}
+            await msg.edit_text(_fmt_ai(data, op), parse_mode='HTML', reply_markup=kb_ai_confirm())
+
+        elif intent == 'TASK':
+            matn  = data.get('task_matn') or voice_text
+            vaqt  = data.get('task_vaqt')
+            egasi = data.get('task_egasi', kim)
+            if not vaqt:
+                await msg.edit_text(
+                    f'🎙 <i>{voice_text}</i>\n\n⚠️ Vaqt aniqlanmadi. '
+                    f'"Ertaga 10:00 da bozor" deb aniqroq ayting.', parse_mode='HTML')
+                return
+            await save_and_schedule_task(ctx.application, matn, vaqt, egasi, cid)
+            await msg.edit_text(
+                f'🎙 <i>{voice_text}</i>\n\n✅ <b>Task saqlandi!</b>\n\n'
+                f'📋 {matn}\n⏰ {vaqt}\n👤 {egasi}', parse_mode='HTML')
+
+        elif intent == 'MEMORY_SAVE':
+            kalit  = data.get('memory_kalit') or ''
+            qiymat = data.get('memory_qiymat') or ''
+            if kalit and qiymat:
+                r = await memory_save(kalit, qiymat, kim)
+                await msg.edit_text(
+                    f'🎙 <i>{voice_text}</i>\n\n🧠 <b>Xotiraga {r}!</b>\n📌 <b>{kalit}</b>: {qiymat}',
+                    parse_mode='HTML')
+            else:
+                await msg.edit_text(
+                    f'🎙 <i>{voice_text}</i>\n\n⚠️ Kalit yoki qiymat aniqlanmadi.', parse_mode='HTML')
+
+        elif intent == 'MEMORY_QUERY':
+            kalit   = data.get('memory_kalit') or voice_text
+            results = await memory_search(kalit)
+            if not results:
+                await msg.edit_text(f'🎙 <i>{voice_text}</i>\n\n🔍 "<b>{kalit}</b>" topilmadi.', parse_mode='HTML')
+            else:
+                txt2 = f'🎙 <i>{voice_text}</i>\n\n🧠 <b>{kalit}:</b>\n\n'
+                for r in results[:5]:
+                    txt2 += f'📌 <b>{r["kalit"]}</b>: {r["qiymat"]}\n'
+                await msg.edit_text(txt2, parse_mode='HTML')
+
+        else:
+            await msg.edit_text(
+                f'🎙 <i>{voice_text}</i>\n\n'
+                f'💬 Accounting, task yoki memory uchun aniqroq ayting.', parse_mode='HTML')
 
     except json.JSONDecodeError:
-        await msg.edit_text('❌ JSON parse xatolik. Claude kutilmagan format qaytardi.')
+        await msg.edit_text('❌ JSON parse xatolik.')
     except Exception as e:
         await msg.edit_text(f'❌ Xatolik: {str(e)[:120]}')
         logger.error(f'handle_voice: {e}')
@@ -1410,6 +1450,284 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         parse_mode='HTML', reply_markup=kb)
 
 # ══════════════════════════════════════════════════════════
+# TASKS + REMINDER TIZIMI
+# ══════════════════════════════════════════════════════════
+
+async def ensure_tasks_sheet():
+    try:
+        sh = get_ss()
+        try:
+            sh.worksheet('TASKS')
+        except Exception:
+            ws = sh.add_worksheet(title='TASKS', rows=1000, cols=8)
+            ws.update('A1:G1', [['id', 'yaratilgan', 'vaqt', 'matn', 'egasi', 'holat', 'chat_id']])
+    except Exception as e:
+        logger.error(f'ensure_tasks_sheet: {e}')
+
+async def task_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
+    d       = ctx.job.data
+    matn    = d['matn']
+    egasi   = d['egasi']
+    row_num = d['row']
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton('✅ Bajarildi', callback_data=f'TASK_DONE_{row_num}'),
+        InlineKeyboardButton('⏭ O\'tkazish', callback_data=f'TASK_SKIP_{row_num}'),
+    ]])
+    txt = f'⏰ <b>ESLATMA!</b>\n\n📋 {matn}\n👤 {egasi}'
+    if egasi == 'FERUDIN':   targets = [CHAT_1]
+    elif egasi == 'GULOYIM': targets = [CHAT_2]
+    else:                    targets = [CHAT_1, CHAT_2]
+    for cid in targets:
+        try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML', reply_markup=kb)
+        except Exception as e: logger.error(f'task_reminder {cid}: {e}')
+
+async def tasks_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q     = update.callback_query
+    await q.answer()
+    parts  = q.data.split('_')   # TASK_DONE_5 / TASK_SKIP_5
+    action = parts[1]
+    row_n  = int(parts[2])
+    status = 'BAJARILDI' if action == 'DONE' else 'O\'TKAZILDI'
+    icon   = '✅' if action == 'DONE' else '⏭'
+    def _upd():
+        get_ss().worksheet('TASKS').update_cell(row_n, 6, status)
+    try:
+        await asyncio.to_thread(_upd)
+        old = q.message.text or ''
+        await q.edit_message_text(f'{icon} <b>{status}</b>\n\n{old}', parse_mode='HTML')
+    except Exception as e:
+        await q.edit_message_text(f'❌ Xatolik: {e}')
+
+async def save_and_schedule_task(app_obj, matn: str, vaqt_str: str, egasi: str, chat_id: str):
+    def _save():
+        ws    = get_ss().worksheet('TASKS')
+        vals  = ws.get_all_values()
+        today = datetime.now(TZ).strftime('%d.%m.%Y')
+        new_id = len(vals)
+        ws.append_row([new_id, today, vaqt_str, matn, egasi, 'FAOL', chat_id],
+                      value_input_option='USER_ENTERED')
+        return new_id, len(vals) + 1
+    try:
+        task_id, row_num = await asyncio.to_thread(_save)
+        try:
+            reminder_dt = TZ.localize(datetime.strptime(vaqt_str, '%d.%m.%Y %H:%M'))
+        except:
+            return task_id, row_num
+        if reminder_dt > datetime.now(TZ):
+            app_obj.job_queue.run_once(
+                task_reminder_job, when=reminder_dt,
+                data={'matn': matn, 'egasi': egasi, 'row': row_num},
+                name=f'task_{task_id}')
+        return task_id, row_num
+    except Exception as e:
+        logger.error(f'save_and_schedule_task: {e}')
+        return None, None
+
+async def reschedule_pending_tasks(app_obj):
+    try:
+        def _get():
+            return get_ss().worksheet('TASKS').get_all_values()
+        vals = await asyncio.to_thread(_get)
+        now  = datetime.now(TZ)
+        count = 0
+        for i, row in enumerate(vals[1:], start=2):
+            if len(row) < 6 or row[5] != 'FAOL': continue
+            try:
+                reminder_dt = TZ.localize(datetime.strptime(row[2], '%d.%m.%Y %H:%M'))
+            except: continue
+            if reminder_dt <= now: continue
+            app_obj.job_queue.run_once(
+                task_reminder_job, when=reminder_dt,
+                data={'matn': row[3], 'egasi': row[4], 'row': i},
+                name=f'task_rs_{i}')
+            count += 1
+        if count: logger.info(f'Restart: {count} ta task qayta scheduled')
+    except Exception as e:
+        logger.error(f'reschedule_pending_tasks: {e}')
+
+async def tasks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    def _get():
+        ws    = get_ss().worksheet('TASKS')
+        vals  = ws.get_all_values()
+        today = datetime.now(TZ).date()
+        result = []
+        for row in vals[1:]:
+            if len(row) < 6 or row[5] != 'FAOL': continue
+            try:
+                dt = TZ.localize(datetime.strptime(row[2], '%d.%m.%Y %H:%M'))
+                if dt.date() >= today:
+                    result.append({'vaqt': row[2], 'matn': row[3], 'egasi': row[4]})
+            except: continue
+        result.sort(key=lambda x: x['vaqt'])
+        return result
+    try:
+        tasks = await asyncio.to_thread(_get)
+        if not tasks:
+            await update.message.reply_text("📋 Faol tasklar yo'q.", reply_markup=kb_main())
+            return
+        txt = '📋 <b>FAOL TASKLAR:</b>\n\n'
+        for t in tasks[:15]:
+            txt += f"⏰ <b>{t['vaqt']}</b>  👤 {t['egasi']}\n📝 {t['matn']}\n\n"
+        await update.message.reply_text(txt, parse_mode='HTML', reply_markup=kb_main())
+    except Exception as e:
+        await update.message.reply_text(f'❌ Xatolik: {e}')
+
+# ══════════════════════════════════════════════════════════
+# MEMORY TIZIMI
+# ══════════════════════════════════════════════════════════
+
+async def ensure_memory_sheet():
+    try:
+        sh = get_ss()
+        try:
+            sh.worksheet('MEMORY')
+        except Exception:
+            ws = sh.add_worksheet(title='MEMORY', rows=1000, cols=6)
+            ws.update('A1:E1', [['id', 'sana', 'kalit', 'qiymat', 'kim']])
+    except Exception as e:
+        logger.error(f'ensure_memory_sheet: {e}')
+
+async def memory_save(kalit: str, qiymat: str, kim: str) -> str:
+    def _save():
+        ws    = get_ss().worksheet('MEMORY')
+        vals  = ws.get_all_values()
+        today = datetime.now(TZ).strftime('%d.%m.%Y')
+        for i, row in enumerate(vals[1:], start=2):
+            if len(row) >= 3 and row[2].lower() == kalit.lower():
+                ws.update(f'B{i}:E{i}', [[today, kalit, qiymat, kim]])
+                return 'yangilandi'
+        ws.append_row([len(vals), today, kalit, qiymat, kim])
+        return 'saqlandi'
+    try:
+        return await asyncio.to_thread(_save)
+    except Exception as e:
+        logger.error(f'memory_save: {e}')
+        return 'xato'
+
+async def memory_search(query: str) -> list:
+    def _search():
+        ws  = get_ss().worksheet('MEMORY')
+        q   = query.lower()
+        out = []
+        for row in ws.get_all_values()[1:]:
+            if len(row) < 4: continue
+            if q in row[2].lower() or q in row[3].lower():
+                out.append({'kalit': row[2], 'qiymat': row[3],
+                            'kim': row[4] if len(row) > 4 else '', 'sana': row[1]})
+        return out
+    try:
+        return await asyncio.to_thread(_search)
+    except Exception as e:
+        logger.error(f'memory_search: {e}')
+        return []
+
+async def memory_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ok(update): return
+    query = ' '.join(ctx.args) if ctx.args else ''
+    if not query:
+        await update.message.reply_text(
+            '🧠 <b>MEMORY</b>\n\n'
+            'Qidirish: <code>/memory Xurshid</code>\n'
+            'Saqlash: "Xurshid raqami: 90-123-45-67"\n'
+            "So'rov: \"Xurshid raqami nima?\"",
+            parse_mode='HTML')
+        return
+    results = await memory_search(query)
+    if not results:
+        await update.message.reply_text(f'🔍 "<b>{query}</b>" topilmadi.', parse_mode='HTML')
+        return
+    txt = f'🧠 <b>MEMORY — "{query}":</b>\n\n'
+    for r in results[:10]:
+        txt += f'📌 <b>{r["kalit"]}</b>: {r["qiymat"]}\n<i>{r["sana"]} | {r["kim"]}</i>\n\n'
+    await update.message.reply_text(txt, parse_mode='HTML')
+
+# ── Matn → Claude → to'g'ri tizimga yo'naltirish ─────────
+
+async def analyze_and_route(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    if not ANTHROPIC_API_KEY: return
+    text = update.message.text.strip()
+    if len(text) < 3: return
+    cid    = str(update.effective_chat.id)
+    kim    = 'FERUDIN' if cid == CHAT_1 else 'GULOYIM'
+    today  = today_str()
+    now_hm = datetime.now(TZ).strftime('%H:%M')
+    import anthropic
+    client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+    prompt = (
+        f'Xabar: "{text}"\nBugun: {today} {now_hm} Toshkent\n\n'
+        f'Faqat JSON qaytargin:\n'
+        f'{{"intent":"<task|memory_save|memory_query|ignore>",'
+        f'"task_matn":"<null|vazifa>",'
+        f'"task_vaqt":"<null|DD.MM.YYYY HH:MM>",'
+        f'"task_egasi":"<FERUDIN|GULOYIM|IKKALASI>",'
+        f'"memory_kalit":"<null|kalit>",'
+        f'"memory_qiymat":"<null|qiymat>"}}\n\n'
+        f'Qoidalar:\n'
+        f'- task: aniq vaqtli eslatma ("ertaga 10da", "soat 15:00 da") — task_vaqt NULL bo\'lsa ignore\n'
+        f'- memory_save: "X:Y", "X raqami Y", "eslab qol X=Y"\n'
+        f'- memory_query: "X nima?", "X qancha?", "X qaerda?"\n'
+        f'- ignore: oddiy suhbat, savol-javob'
+    )
+    msg = None
+    try:
+        msg = await update.message.reply_text('⏳')
+        resp = await asyncio.to_thread(
+            client.messages.create,
+            model='claude-haiku-4-5-20251001',
+            max_tokens=200,
+            messages=[{'role': 'user', 'content': prompt}])
+        raw  = re.sub(r'```(?:json)?\s*', '', resp.content[0].text.strip()).strip('`').strip()
+        data = json.loads(raw)
+        intent = data.get('intent', 'ignore')
+
+        if intent == 'task':
+            matn  = data.get('task_matn') or text
+            vaqt  = data.get('task_vaqt')
+            egasi = data.get('task_egasi', kim)
+            if not vaqt:
+                await msg.edit_text("⚠️ Vaqt aniqlanmadi. Masalan: \"02.05.2026 10:00 da bozor\"")
+                return
+            await save_and_schedule_task(ctx.application, matn, vaqt, egasi, cid)
+            await msg.edit_text(
+                f'✅ <b>Task saqlandi!</b>\n\n📋 {matn}\n⏰ {vaqt}\n👤 {egasi}',
+                parse_mode='HTML')
+
+        elif intent == 'memory_save':
+            kalit  = data.get('memory_kalit') or ''
+            qiymat = data.get('memory_qiymat') or ''
+            if not kalit or not qiymat:
+                await msg.delete(); return
+            r = await memory_save(kalit, qiymat, kim)
+            await msg.edit_text(
+                f'🧠 <b>Xotiraga {r}!</b>\n\n📌 <b>{kalit}</b>: {qiymat}',
+                parse_mode='HTML')
+
+        elif intent == 'memory_query':
+            kalit   = data.get('memory_kalit') or text
+            results = await memory_search(kalit)
+            if not results:
+                await msg.edit_text(f'🔍 "<b>{kalit}</b>" topilmadi.', parse_mode='HTML')
+            else:
+                txt2 = f'🧠 <b>{kalit}:</b>\n\n'
+                for r in results[:5]:
+                    txt2 += f'📌 <b>{r["kalit"]}</b>: {r["qiymat"]}\n'
+                await msg.edit_text(txt2, parse_mode='HTML')
+
+        else:
+            await msg.delete()
+
+    except json.JSONDecodeError:
+        if msg:
+            try: await msg.delete()
+            except: pass
+    except Exception as e:
+        if msg:
+            try: await msg.delete()
+            except: pass
+        logger.error(f'analyze_and_route: {e}')
+
+# ══════════════════════════════════════════════════════════
 # NAMOZ TIZIMI
 # ══════════════════════════════════════════════════════════
 NAMOZ_UZ    = ['bomdod', 'peshin', 'asr', 'shom', 'xufton']
@@ -1633,8 +1951,11 @@ def main():
         await load_categories()
         await ensure_qarz()
         await ensure_namoz_sheet()
+        await ensure_tasks_sheet()
+        await ensure_memory_sheet()
         await schedule_todays_prayers(application)
-        logger.info('Startup: kategoriyalar, QARZ va NAMOZ yuklandi')
+        await reschedule_pending_tasks(application)
+        logger.info('Startup: barcha tizimlar yuklandi (QARZ, NAMOZ, TASKS, MEMORY)')
     app.post_init = on_startup
 
     # ── Hisobot conversation ─────────────────────────────
@@ -1669,11 +1990,13 @@ def main():
     )
 
     # ── Handlers ro'yxatga olish ─────────────────────────
-    app.add_handler(CommandHandler('start', start))
-    app.add_handler(CommandHandler('menu',  start))
-    app.add_handler(CommandHandler('debug', debug_cmd))
-    app.add_handler(CommandHandler('qarz',  qarz_cmd))
-    app.add_handler(CommandHandler('admin', admin_cmd))
+    app.add_handler(CommandHandler('start',  start))
+    app.add_handler(CommandHandler('menu',   start))
+    app.add_handler(CommandHandler('debug',  debug_cmd))
+    app.add_handler(CommandHandler('qarz',   qarz_cmd))
+    app.add_handler(CommandHandler('admin',  admin_cmd))
+    app.add_handler(CommandHandler('tasks',  tasks_cmd))
+    app.add_handler(CommandHandler('memory', memory_cmd))
 
     # AI handlers (photo + voice) — ConversationHandler dan OLDIN
     app.add_handler(MessageHandler(
@@ -1690,6 +2013,7 @@ def main():
     app.add_handler(CallbackQueryHandler(qarz_callback,   pattern='^QARZ_'))
     app.add_handler(CallbackQueryHandler(admin_callback,  pattern='^(ADMIN_|ADM_)'))
     app.add_handler(CallbackQueryHandler(namoz_callback,  pattern='^NAMOZ_'))
+    app.add_handler(CallbackQueryHandler(tasks_callback,  pattern='^TASK_'))
 
     # Conversation handlers
     app.add_handler(hisobot_conv)
