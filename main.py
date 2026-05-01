@@ -739,7 +739,7 @@ async def handle_voice(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         oai_client = oai.OpenAI(api_key=OPENAI_API_KEY)
         transcript = await asyncio.to_thread(
             oai_client.audio.transcriptions.create,
-            model='whisper-1', file=audio_io, language='uz')
+            model='whisper-1', file=audio_io, language=None)
         voice_text = transcript.text.strip()
         await msg.edit_text(
             f'🎙 <i>{voice_text}</i>\n\n⏳ Tahlil qilinmoqda...', parse_mode='HTML')
