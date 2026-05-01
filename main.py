@@ -2308,6 +2308,112 @@ def qarz_close_api(row_index: int):
     except Exception as e:
         raise HTTPException(500, str(e))
 
+# ── TASKS API ────────────────────────────────────────────
+class TaskModel(BaseModel):
+    matn:    str
+    vaqt:    str
+    egasi:   str = 'FERUDIN'
+    chat_id: str = ''
+
+@api.get('/tasks')
+def get_tasks_api(status: str = 'FAOL'):
+    try:
+        ws   = get_ss().worksheet('TASKS')
+        vals = ws.get_all_values()
+        now  = datetime.now(TZ)
+        result = []
+        for i, row in enumerate(vals[1:], start=2):
+            if len(row) < 6: continue
+            if status != 'ALL' and row[5] != status: continue
+            overdue = False
+            try:
+                dt = TZ.localize(datetime.strptime(row[2], '%d.%m.%Y %H:%M'))
+                overdue = dt < now and row[5] == 'FAOL'
+            except: pass
+            result.append({'row':i,'id':row[0],'yaratilgan':row[1],'vaqt':row[2],
+                           'matn':row[3],'egasi':row[4],'holat':row[5],'overdue':overdue})
+        result.sort(key=lambda x: x['vaqt'])
+        return {'tasks':result,'count':len(result)}
+    except Exception as e: raise HTTPException(500, str(e))
+
+@api.post('/tasks')
+def add_task_api(task: TaskModel):
+    try:
+        ws    = get_ss().worksheet('TASKS')
+        vals  = ws.get_all_values()
+        today = datetime.now(TZ).strftime('%d.%m.%Y')
+        ws.append_row([len(vals),today,task.vaqt,task.matn,task.egasi,'FAOL',task.chat_id],
+                      value_input_option='USER_ENTERED')
+        return {'success':True}
+    except Exception as e: raise HTTPException(500, str(e))
+
+@api.post('/tasks/done/{row}')
+def task_done_api(row: int):
+    try:
+        get_ss().worksheet('TASKS').update_cell(row, 6, 'BAJARILDI')
+        return {'success':True}
+    except Exception as e: raise HTTPException(500, str(e))
+
+# ── MEMORY API ───────────────────────────────────────────
+class MemoryModel(BaseModel):
+    kalit:  str
+    qiymat: str
+    kim:    str = 'FERUDIN'
+
+@api.get('/memory')
+def get_memory_api(q: str = ''):
+    try:
+        ws   = get_ss().worksheet('MEMORY')
+        vals = ws.get_all_values()
+        ql   = q.lower()
+        result = []
+        for row in vals[1:]:
+            if len(row) < 4: continue
+            if not q or ql in row[2].lower() or ql in row[3].lower():
+                result.append({'kalit':row[2],'qiymat':row[3],
+                               'kim':row[4] if len(row)>4 else '','sana':row[1]})
+        return {'memories':result,'count':len(result)}
+    except Exception as e: raise HTTPException(500, str(e))
+
+@api.post('/memory')
+def save_memory_api(mem: MemoryModel):
+    try:
+        ws    = get_ss().worksheet('MEMORY')
+        vals  = ws.get_all_values()
+        today = datetime.now(TZ).strftime('%d.%m.%Y')
+        for i, row in enumerate(vals[1:], start=2):
+            if len(row) >= 3 and row[2].lower() == mem.kalit.lower():
+                ws.update(f'B{i}:E{i}', [[today, mem.kalit, mem.qiymat, mem.kim]])
+                return {'success':True,'action':'updated'}
+        ws.append_row([len(vals), today, mem.kalit, mem.qiymat, mem.kim])
+        return {'success':True,'action':'created'}
+    except Exception as e: raise HTTPException(500, str(e))
+
+# ── NAMOZ API ────────────────────────────────────────────
+@api.get('/namoz/stats')
+def namoz_stats_api():
+    try:
+        ws      = get_ss().worksheet('NAMOZ')
+        vals    = ws.get_all_values()
+        today   = datetime.now(TZ).date()
+        wk_ago  = today - timedelta(days=7)
+        nl      = ['bomdod','peshin','asr','shom','xufton']
+        empty   = lambda: {n:{'ok':0,'no':0} for n in nl}
+        stats   = {'FERUDIN':empty(),'GULOYIM':empty()}
+        for row in vals[1:]:
+            if len(row) < 7: continue
+            try: rd = datetime.strptime(row[0],'%d.%m.%Y').date()
+            except: continue
+            if rd < wk_ago or rd > today: continue
+            kim = row[6]
+            if kim not in stats: continue
+            for i,n in enumerate(nl):
+                v = row[i+1] if i+1 < len(row) else ''
+                if v == "O'QILDI":     stats[kim][n]['ok'] += 1
+                elif v == "O'QILMADI": stats[kim][n]['no'] += 1
+        return {'stats':stats}
+    except Exception as e: raise HTTPException(500, str(e))
+
 # ── KATEGORIYALAR API ────────────────────────────────────
 @api.get('/categories')
 def categories_api():
