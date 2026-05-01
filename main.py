@@ -2412,20 +2412,61 @@ def qarz_list_api():
 @api.post('/qarz/add')
 def qarz_add_api(q: QarzModel):
     try:
-        ss  = get_ss()
+        ss    = get_ss()
+        today = datetime.now(TZ).strftime('%d.%m.%Y')
         try: ws = ss.worksheet('QARZ')
         except:
             ws = ss.add_worksheet(title='QARZ', rows=500, cols=12)
-            ws.update('A1:J1',[['raqam','tur','kim','summa_uzs','summa_usd','sana','muddat','holat','qaytarilgan_sana','note']])
+            ws.update('A1:J1', [['raqam','tur','kim','summa_uzs','summa_usd',
+                                  'sana','muddat','holat','qaytarilgan_sana','note']])
         rows = ws.get_all_values()
-        num  = len(rows)
-        from datetime import datetime as dt2
-        today = dt2.now(TZ).strftime('%d.%m.%Y')
-        ws.append_row([num,q.tur,q.kim,q.summa_uzs or '',q.summa_usd or '',
-            q.sana or today,q.muddat,'AKTIV','',q.note or ''],
-            value_input_option='USER_ENTERED')
-        return {'success':True}
-    except Exception as e: raise HTTPException(500, str(e))
+        ws.append_row([
+            len(rows), q.tur, q.kim,
+            q.summa_uzs or '', q.summa_usd or '',
+            q.sana or today, q.muddat, 'AKTIV', '', q.note or ''
+        ], value_input_option='USER_ENTERED')
+
+        # BALANCE GA TA'SIR — CHIQIM / KIRIM ga yozish
+        egasi = 'FERUDIN'
+        try:
+            usd_val = float(q.summa_usd) if q.summa_usd else None
+            uzs_val = float(q.summa_uzs) if q.summa_uzs else None
+
+            if q.tur == 'BERILGAN':
+                sheet_name = 'CHIQIM'
+                tur_name   = 'QARZ BERILDI'
+                note_tx    = f'Qarz berildi: {q.kim}'
+            else:
+                sheet_name = 'KIRIM'
+                tur_name   = 'QARZ OLINDI'
+                note_tx    = f'Qarz olindi: {q.kim}'
+
+            sh    = ss.worksheet(sheet_name)
+            col_c = sh.col_values(3)
+            last  = 2
+            for i, v in enumerate(col_c):
+                if i < 2: continue
+                if v and str(v).strip(): last = i + 1
+            new_row = last + 1
+
+            try: usd = float(usd_val) if usd_val else ''
+            except: usd = ''
+            try: uzs = float(uzs_val) if uzs_val else ''
+            except: uzs = ''
+
+            sh.update(f'B{new_row}:H{new_row}', [[
+                new_row - 2, today, egasi, tur_name, 'CASH', usd, uzs
+            ]], value_input_option='USER_ENTERED')
+            sh.update(f'J{new_row}', [[note_tx]])
+            logger.info(
+                f'qarz_add_api balance: {sheet_name} row={new_row} '
+                f'tur={tur_name} usd={usd} uzs={uzs}')
+        except Exception as se:
+            logger.error(f'qarz_add_api balance FAILED: {se}')
+
+        return {'success': True}
+    except Exception as e:
+        raise HTTPException(500, str(e))
 
 @api.post('/qarz/close/{row_index}')
 def qarz_close_api(row_index: int):
