@@ -730,7 +730,7 @@ async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # AI — RASM (PHOTO) HANDLER
 # ══════════════════════════════════════════════════════════
 async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    """Chek/receipt rasmi → Claude Vision → tasdiqlash"""
+    """Rasm → klassifikatsiya → namoz jadvali yoki chek handler"""
     if not ok(update): return
     msg = await update.message.reply_text('📸 Rasm tahlil qilinmoqda...')
     try:
@@ -738,17 +738,35 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             await msg.edit_text('❌ ANTHROPIC_API_KEY Railway Variables ga qo\'shilmagan.')
             return
         import anthropic
-        # Rasm yuklash
-        photo     = update.message.photo[-1]
-        tg_file   = await ctx.bot.get_file(photo.file_id)
-        fb        = await tg_file.download_as_bytearray()
-        image_b64 = base64.standard_b64encode(bytes(fb)).decode('utf-8')
+        photo      = update.message.photo[-1]
+        tg_file    = await ctx.bot.get_file(photo.file_id)
+        fb         = await tg_file.download_as_bytearray()
+        image_b64  = base64.standard_b64encode(bytes(fb)).decode('utf-8')
         media_type = 'image/png' if bytes(fb)[:8]==b'\x89PNG\r\n\x1a\n' else 'image/jpeg'
 
+        # Rasm turini aniqlash (haiku — tez, arzon)
+        client  = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        cl_resp = await asyncio.to_thread(
+            client.messages.create,
+            model='claude-haiku-4-5-20251001',
+            max_tokens=5,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'type':'image','source':{'type':'base64','media_type':media_type,'data':image_b64}},
+                    {'type':'text','text':'1=namoz vaqtlari jadvali (Bomdod/Peshin/Asr/Shom/Xufton ko\'rinadi), 2=chek/kvitansiya/boshqa. Faqat bitta raqam.'}
+                ]
+            }]
+        )
+        rasm_tur = cl_resp.content[0].text.strip()[:1]
+
+        if rasm_tur == '1':
+            await handle_namoz_photo(update, ctx, msg, image_b64, media_type)
+            return
+
+        # Chek/kvitansiya — mavjud logic
         chiqim_list = ', '.join(get_chiqim_turs())
         today       = today_str()
-        client      = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-
         resp = await asyncio.to_thread(
             client.messages.create,
             model='claude-opus-4-5',
@@ -784,6 +802,108 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(f'❌ Xatolik: {str(e)[:120]}')
             logger.error(f'handle_photo: {e}')
+
+
+async def handle_namoz_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                              msg, image_b64: str, media_type: str):
+    """Namoz vaqtlari rasmini analiz qilib NAMOZ_TIMES varag'iga saqlash"""
+    await msg.edit_text('🕌 Namoz jadvali tahlil qilinmoqda...')
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        now    = datetime.now(TZ)
+
+        resp = await asyncio.to_thread(
+            client.messages.create,
+            model='claude-opus-4-5',
+            max_tokens=2000,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'type':'image','source':{'type':'base64','media_type':media_type,'data':image_b64}},
+                    {'type':'text','text':(
+                        f'Bu namoz vaqtlari jadvali. '
+                        f'Har kun uchun vaqtlarni JSON formatida chiqar.\n'
+                        f'Format (faqat JSON, boshqa narsa yozma):\n'
+                        f'{{"month": <oy raqami 1-12>, "days": {{'
+                        f'"1": {{"bomdod":"HH:MM","quyosh":"HH:MM","peshin":"HH:MM","asr":"HH:MM","shom":"HH:MM","xufton":"HH:MM"}},'
+                        f'"2": {{...}}, ...}}}}\n'
+                        f'Agar quyosh vaqti ko\'rsatilmagan bo\'lsa null qo\'y.'
+                    )}
+                ]
+            }]
+        )
+
+        raw  = resp.content[0].text.strip()
+        raw  = re.sub(r'```(?:json)?\s*', '', raw).strip('`').strip()
+        data = json.loads(raw)
+
+        month = data.get('month', now.month)
+        days  = data.get('days', {})
+
+        if not days:
+            await msg.edit_text("❌ Jadvaldan ma'lumot o'qib bo'lmadi. Aniqroq rasm yuboring.")
+            return
+
+        sh = get_ss()
+        try:
+            ws = sh.worksheet('NAMOZ_TIMES')
+        except Exception:
+            ws = sh.add_worksheet(title='NAMOZ_TIMES', rows=400, cols=10)
+            ws.update('A1:I1', [['year','month','day','bomdod','quyosh','peshin','asr','shom','xufton']])
+
+        year = now.year
+        # Mavjud oy ma'lumotlarini o'chir
+        all_rows = ws.get_all_values()
+        rows_to_keep = [all_rows[0]] if all_rows else [['year','month','day','bomdod','quyosh','peshin','asr','shom','xufton']]
+        for row in all_rows[1:]:
+            if len(row) >= 3:
+                try:
+                    if int(row[0]) == year and int(row[1]) == month:
+                        continue
+                except Exception:
+                    pass
+            rows_to_keep.append(row)
+        ws.clear()
+        if rows_to_keep:
+            ws.update('A1', rows_to_keep)
+
+        # Yangi ma'lumotlarni qo'sh
+        for day_str, times in days.items():
+            ws.append_row([
+                year, month, int(day_str),
+                times.get('bomdod') or '',
+                times.get('quyosh') or '',
+                times.get('peshin') or '',
+                times.get('asr')    or '',
+                times.get('shom')   or '',
+                times.get('xufton') or '',
+            ], value_input_option='USER_ENTERED')
+
+        month_names = {
+            1:'Yanvar',2:'Fevral',3:'Mart',4:'Aprel',5:'May',6:'Iyun',
+            7:'Iyul',8:'Avgust',9:'Sentabr',10:'Oktabr',11:'Noyabr',12:'Dekabr'
+        }
+        sample_key = list(days.keys())[0]
+        sample     = days[sample_key]
+        await msg.edit_text(
+            f"✅ <b>{month_names.get(month,month)}-oy namoz vaqtlari saqlandi!</b>\n\n"
+            f"📊 {len(days)} kun ma'lumoti yangilandi\n\n"
+            f"Namuna ({sample_key}-kun):\n"
+            f"🌅 Bomdod: {sample.get('bomdod','?')}\n"
+            f"☀️ Quyosh: {sample.get('quyosh') or '—'}\n"
+            f"☀️ Peshin:  {sample.get('peshin','?')}\n"
+            f"🌤 Asr:    {sample.get('asr','?')}\n"
+            f"🌇 Shom:   {sample.get('shom','?')}\n"
+            f"🌙 Xufton: {sample.get('xufton','?')}",
+            parse_mode='HTML'
+        )
+
+    except json.JSONDecodeError:
+        await msg.edit_text("❌ Jadval o'qilmadi. Rasmni aniqroq qilib yuboring.")
+    except Exception as e:
+        await msg.edit_text(f"❌ Xatolik: {str(e)[:100]}")
+        logger.error(f'handle_namoz_photo: {e}')
 
 # ══════════════════════════════════════════════════════════
 # AI — OVOZLI XABAR (VOICE) HANDLER
@@ -1535,6 +1655,10 @@ async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     sana   = datetime.now(TZ).strftime('%d.%m.%Y')
     txt    = f'🕌 <b>Namoz vaqtlari — {sana}</b>\n\n'
     for namoz, vaqt in (times or {}).items():
+        if namoz == 'quyosh':
+            if vaqt:
+                txt += f'   ☀️ <i>Quyosh: {vaqt} (bomdod shu vaqtgacha)</i>\n'
+            continue
         emoji  = NAMOZ_EMOJI.get(namoz, '🕌')
         marker = '✅' if vaqt < now_hm else '⏰'
         txt   += f'{marker} {emoji} <b>{namoz.upper()}</b>: {vaqt}\n'
@@ -1881,13 +2005,37 @@ async def ensure_namoz_sheet():
         logger.error(f'ensure_namoz_sheet: {e}')
 
 def get_prayer_times(target_date=None) -> dict:
-    """Toshkent namoz vaqtlari — O'zbekiston Musulmonlari Idorasi 2026 jadvali."""
+    """Namoz vaqtlari: avval NAMOZ_TIMES varag'idan, bo'lmasa hardcode fallback."""
     if target_date is None:
         target_date = datetime.now(TZ).date()
     elif isinstance(target_date, str):
         try: target_date = datetime.strptime(target_date, '%d-%m-%Y').date()
         except: target_date = datetime.now(TZ).date()
 
+    # 1. Google Sheets NAMOZ_TIMES dan olish
+    try:
+        ws   = get_ss().worksheet('NAMOZ_TIMES')
+        rows = ws.get_all_values()
+        for row in rows[1:]:
+            if len(row) < 9: continue
+            try:
+                if (int(row[0]) == target_date.year and
+                    int(row[1]) == target_date.month and
+                    int(row[2]) == target_date.day):
+                    return {
+                        'bomdod': row[3] or '',
+                        'quyosh': row[4] or '',
+                        'peshin': row[5] or '',
+                        'asr':    row[6] or '',
+                        'shom':   row[7] or '',
+                        'xufton': row[8] or '',
+                    }
+            except Exception:
+                continue
+    except Exception as e:
+        logger.warning(f'NAMOZ_TIMES read xato: {e}')
+
+    # 2. Hardcode fallback
     month = target_date.month
     day   = target_date.day
 
@@ -1947,7 +2095,8 @@ def get_prayer_times(target_date=None) -> dict:
         else:           times = periods[2]
 
     return {
-        'bomdod': times[0], 'peshin': times[1], 'asr': times[2],
+        'bomdod': times[0], 'quyosh': '',
+        'peshin': times[1], 'asr':    times[2],
         'shom':   times[3], 'xufton': times[4],
     }
 
@@ -2028,6 +2177,31 @@ async def namoz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         f'{icon} <b>{namoz.upper()}</b> — {status}\n📅 {sana} | 👤 {kim}',
         parse_mode='HTML')
 
+async def namoz_update_reminder(ctx: ContextTypes.DEFAULT_TYPE):
+    """Har oy 1-sanada namoz jadvalini yangilash eslatmasi"""
+    now = datetime.now(TZ)
+    if now.day != 1:
+        return
+    month_names = {
+        1:'Yanvar',2:'Fevral',3:'Mart',4:'Aprel',
+        5:'May',6:'Iyun',7:'Iyul',8:'Avgust',
+        9:'Sentabr',10:'Oktabr',11:'Noyabr',12:'Dekabr'
+    }
+    month_name = month_names.get(now.month, str(now.month))
+    text = (
+        f"🕌 <b>Namoz vaqtlarini yangilash vaqti!</b>\n\n"
+        f"📅 {month_name} {now.year} oyi boshlandi.\n\n"
+        f"Yangi oyning namoz vaqtlari jadvalini "
+        f"(islom.uz yoki masjid taqvimi) rasm sifatida "
+        f"yuboring — men avtomatik yangilayman. 📸"
+    )
+    for cid in [CHAT_1, CHAT_2]:
+        try:
+            await ctx.bot.send_message(chat_id=cid, text=text, parse_mode='HTML')
+        except Exception as e:
+            logger.error(f'namoz_update_reminder {cid}: {e}')
+
+
 async def schedule_todays_prayers(app_obj, date_obj=None):
     if date_obj is None:
         date_obj = datetime.now(TZ).date()
@@ -2038,6 +2212,8 @@ async def schedule_todays_prayers(app_obj, date_obj=None):
         return
     now = datetime.now(TZ)
     for namoz, vaqt_str in times.items():
+        if namoz not in NAMOZ_COL or not vaqt_str:
+            continue
         prayer_dt   = _parse_prayer_dt(vaqt_str, date_obj)
         reminder_dt = prayer_dt - timedelta(minutes=20)
         question_dt = prayer_dt + timedelta(minutes=15)
@@ -2230,6 +2406,10 @@ def main():
     app.job_queue.run_daily(namoz_weekly_stats,
         time=dtime(hour=4, minute=5, tzinfo=pytz.utc),     # 09:05 Tashkent
         days=(0,))  # PTB: 0 = dushanba
+    # Har oy 1-sanada namoz jadvalini yangilash eslatmasi — 11:00 Tashkent
+    app.job_queue.run_daily(namoz_update_reminder,
+        time=dtime(hour=6, minute=0, tzinfo=pytz.utc),
+        name='namoz_update_reminder')
 
     logger.info('Bot ishga tushdi!')
     app.run_polling(drop_pending_updates=True)
