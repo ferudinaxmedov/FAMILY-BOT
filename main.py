@@ -2839,6 +2839,42 @@ async def save_categories_api(payload: dict):
     saved = await save_categories()
     return {'success':saved}
 
+# ── AI CHAT ─────────────────────────────────────────────
+@api.post('/ai/chat')
+async def ai_chat(payload: dict):
+    try:
+        anthropic_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not anthropic_key:
+            return {'reply': '❌ ANTHROPIC_API_KEY sozlanmagan'}
+
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=anthropic_key)
+
+        message = payload.get('message', '')
+        user = payload.get('user', 'FERUDIN')
+
+        if not message:
+            return {'reply': '❌ Xabar bo\'sh'}
+
+        response = client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=1000,
+            system=f"""Sen AFG Family Bot ning AI assistantisin.
+Foydalanuvchi: {user}.
+Bu oilaviy hisob-kitob va shaxsiy agent tizimi.
+O'zbek, Rus va Ingliz tillarida gaplasha olasan.
+Qisqa, aniq va foydali javoblar ber.
+Hisob-kitob, vazifalar, eslatmalar, umumiy savollar — hamma narsada yordam ber.""",
+            messages=[{'role': 'user', 'content': message}]
+        )
+
+        reply = response.content[0].text
+        return {'reply': reply}
+
+    except Exception as e:
+        logger.error('AI chat xato: %s', e)
+        return {'reply': f'❌ Xatolik: {str(e)[:100]}'}
+
 # ── RUN ─────────────────────────────────────────────────
 def run_api():
     import asyncio, uvicorn
