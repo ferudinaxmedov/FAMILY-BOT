@@ -7,6 +7,7 @@ from datetime import datetime
 from typing import Optional
 import pytz
 import gspread
+import anthropic
 from google.oauth2.service_account import Credentials
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.middleware.cors import CORSMiddleware
@@ -15,9 +16,10 @@ from pydantic import BaseModel
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-SPREADSHEET_ID = os.environ['SPREADSHEET_ID']
-CREDS_JSON     = os.environ['GOOGLE_CREDS_JSON']
-TZ             = pytz.timezone('Asia/Tashkent')
+SPREADSHEET_ID   = os.environ['SPREADSHEET_ID']
+CREDS_JSON       = os.environ['GOOGLE_CREDS_JSON']
+ANTHROPIC_API_KEY = os.environ.get('ANTHROPIC_API_KEY', '')
+TZ               = pytz.timezone('Asia/Tashkent')
 
 app = FastAPI(title='Family Accounting API')
 
@@ -77,6 +79,10 @@ class UpdateTransaction(BaseModel):
     valyuta: Optional[str] = None
     summa:   Optional[float] = None
     note:    Optional[str] = None
+
+class ChatRequest(BaseModel):
+    message: str
+    user:    str = 'FERUDIN'
 
 # ── HELPERS ────────────────────────────────────────────────
 def read_sheet(sheet_name: str):
@@ -299,4 +305,31 @@ def update_transaction(sheet: str, row: int, data: UpdateTransaction):
         if data.note is not None: sh.update(f'J{row}', [[data.note]])
         return {'success': True, 'message': 'Yangilandi'}
     except Exception as e:
+        raise HTTPException(500, str(e))
+
+# ── AI CHAT ────────────────────────────────────────────────
+@app.post('/ai/chat')
+def ai_chat(req: ChatRequest):
+    if not ANTHROPIC_API_KEY:
+        raise HTTPException(503, 'ANTHROPIC_API_KEY sozlanmagan')
+    try:
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        msg = client.messages.create(
+            model='claude-haiku-4-5-20251001',
+            max_tokens=1024,
+            system=(
+                'Siz Family Bot ning AI assistantisiz. '
+                'Foydalanuvchi oila byudjeti, xarajatlar, kirimlar, qarzlar, '
+                'namoz vaqtlari va kundalik ishlar haqida savol berishi mumkin. '
+                'Qisqa, aniq va foydali javob bering. O\'zbek tilida javob bering.'
+            ),
+            messages=[{'role': 'user', 'content': req.message}],
+        )
+        reply = msg.content[0].text if msg.content else 'Javob kelmadi'
+        return {'reply': reply}
+    except anthropic.APIStatusError as e:
+        logger.error('Anthropic API xato: %s', e)
+        raise HTTPException(502, f'AI xatolik: {e.message}')
+    except Exception as e:
+        logger.error('AI chat xato: %s', e)
         raise HTTPException(500, str(e))
