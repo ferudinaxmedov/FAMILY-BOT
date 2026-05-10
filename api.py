@@ -315,8 +315,7 @@ async def ai_chat(payload: dict):
         if not anthropic_key:
             return {'reply': '❌ ANTHROPIC_API_KEY sozlanmagan'}
 
-        import anthropic as _anthropic
-        client = _anthropic.Anthropic(api_key=anthropic_key)
+        client = anthropic.Anthropic(api_key=anthropic_key)
 
         message = payload.get('message', '')
         user = payload.get('user', 'FERUDIN')
