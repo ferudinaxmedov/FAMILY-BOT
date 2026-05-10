@@ -309,27 +309,36 @@ def update_transaction(sheet: str, row: int, data: UpdateTransaction):
 
 # ── AI CHAT ────────────────────────────────────────────────
 @app.post('/ai/chat')
-def ai_chat(req: ChatRequest):
-    if not ANTHROPIC_API_KEY:
-        raise HTTPException(503, 'ANTHROPIC_API_KEY sozlanmagan')
+async def ai_chat(payload: dict):
     try:
-        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
-        msg = client.messages.create(
+        anthropic_key = os.environ.get('ANTHROPIC_API_KEY')
+        if not anthropic_key:
+            return {'reply': '❌ ANTHROPIC_API_KEY sozlanmagan'}
+
+        import anthropic as _anthropic
+        client = _anthropic.Anthropic(api_key=anthropic_key)
+
+        message = payload.get('message', '')
+        user = payload.get('user', 'FERUDIN')
+
+        if not message:
+            return {'reply': '❌ Xabar bo\'sh'}
+
+        response = client.messages.create(
             model='claude-haiku-4-5-20251001',
-            max_tokens=1024,
-            system=(
-                'Siz Family Bot ning AI assistantisiz. '
-                'Foydalanuvchi oila byudjeti, xarajatlar, kirimlar, qarzlar, '
-                'namoz vaqtlari va kundalik ishlar haqida savol berishi mumkin. '
-                'Qisqa, aniq va foydali javob bering. O\'zbek tilida javob bering.'
-            ),
-            messages=[{'role': 'user', 'content': req.message}],
+            max_tokens=1000,
+            system=f"""Sen AFG Family Bot ning AI assistantisin.
+Foydalanuvchi: {user}.
+Bu oilaviy hisob-kitob va shaxsiy agent tizimi.
+O'zbek, Rus va Ingliz tillarida gaplasha olasan.
+Qisqa, aniq va foydali javoblar ber.
+Hisob-kitob, vazifalar, eslatmalar, umumiy savollar — hamma narsada yordam ber.""",
+            messages=[{'role': 'user', 'content': message}]
         )
-        reply = msg.content[0].text if msg.content else 'Javob kelmadi'
+
+        reply = response.content[0].text
         return {'reply': reply}
-    except anthropic.APIStatusError as e:
-        logger.error('Anthropic API xato: %s', e)
-        raise HTTPException(502, f'AI xatolik: {e.message}')
+
     except Exception as e:
         logger.error('AI chat xato: %s', e)
-        raise HTTPException(500, str(e))
+        return {'reply': f'❌ Xatolik: {str(e)[:100]}'}
