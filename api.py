@@ -4,7 +4,7 @@
 
 import os, json, logging
 from datetime import datetime
-from typing import Optional
+from typing import Optional, List
 import pytz
 import gspread
 import anthropic
@@ -341,3 +341,128 @@ Hisob-kitob, vazifalar, eslatmalar, umumiy savollar — hamma narsada yordam ber
     except Exception as e:
         logger.error('AI chat xato: %s', e)
         return {'reply': f'❌ Xatolik: {str(e)[:100]}'}
+
+
+# ── BNB MODELS ─────────────────────────────────────────────
+class GuestModel(BaseModel):
+    name: str
+    nationality: str
+    dob: str
+    passportId: str
+
+class BnBRegistration(BaseModel):
+    chat_id: str
+    apartment: str
+    guests: List[GuestModel]
+    uzbekEntryDate: Optional[str] = ""
+    aptEntryDate: Optional[str] = ""
+    departureDate: Optional[str] = ""
+    regStartDate: Optional[str] = ""
+    regEndDate: Optional[str] = ""
+    room: Optional[str] = ""
+    paymentAmount: Optional[str] = ""
+    paymentBy: Optional[str] = "guest"
+
+class SendFileRequest(BaseModel):
+    chat_id: str
+    file_type: str  # "ish" | "cad" | "ferudin"
+    apartment: Optional[str] = "28"
+
+
+# ── BNB ENDPOINTS ──────────────────────────────────────────
+@app.post('/bnb/register')
+async def bnb_register(reg: BnBRegistration):
+    try:
+        from bnb_services import (get_drive_file, tg_send_file,
+                                   save_bnb_to_sheets, APT_ISH, APT_CAD, FERUDIN_PDF_ID)
+        from generate_doc import generate_ariza_doc
+        import asyncio
+        import requests as http
+
+        reg_dict = reg.dict()
+        chat_id = reg.chat_id
+        apt = reg.apartment
+
+        tok = os.environ.get("BOT_TOKEN", "")
+        http.post(f"https://api.telegram.org/bot{tok}/sendMessage",
+            json={"chat_id": chat_id, "text": "📋 Hujjatlar tayyorlanmoqda..."},
+            timeout=10)
+
+        # 1. ARIZA
+        ariza_bytes = generate_ariza_doc(reg_dict)
+        guest_name = (reg.guests[0].name if reg.guests else "mehmon").replace(" ", "_")[:20]
+        tg_send_file(chat_id, ariza_bytes, f"Ariza_{apt}_{guest_name}.docx",
+            f"1/4 - {apt}-xona ARIZA hujjati")
+
+        # 2. Ishonchnoma
+        ish_id = APT_ISH.get(apt, "")
+        if ish_id:
+            data = await asyncio.to_thread(get_drive_file, ish_id)
+            tg_send_file(chat_id, data, f"Ishonchnoma_{apt}.pdf",
+                f"2/4 - {apt}-xona Ishonchnoma")
+
+        # 3. Kadastr
+        cad_id = APT_CAD.get(apt, "")
+        if cad_id:
+            data = await asyncio.to_thread(get_drive_file, cad_id)
+            tg_send_file(chat_id, data, f"Kadastr_{apt}.pdf",
+                f"3/4 - {apt}-xona Kadastr")
+
+        # 4. Ferudin ID
+        if FERUDIN_PDF_ID:
+            data = await asyncio.to_thread(get_drive_file, FERUDIN_PDF_ID)
+            tg_send_file(chat_id, data, "identification_card_FERUDIN.pdf",
+                "4/4 - identification card FERUDIN")
+
+        # Sheets ga yozish
+        await asyncio.to_thread(save_bnb_to_sheets, reg_dict)
+
+        return {"success": True, "message": "Ro'yxatga olindi, hujjatlar yuborildi"}
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.post('/bnb/send-file')
+async def bnb_send_file(req: SendFileRequest):
+    try:
+        from bnb_services import (get_drive_file, tg_send_file,
+                                   APT_ISH, APT_CAD, FERUDIN_PDF_ID)
+        import asyncio
+
+        ft = req.file_type
+        apt = req.apartment
+        chat_id = req.chat_id
+
+        if ft == "ferudin":
+            file_id = FERUDIN_PDF_ID
+            filename = "identification_card_FERUDIN.pdf"
+            caption = "Ferudin ID Card"
+        elif ft == "ish":
+            file_id = APT_ISH.get(apt, "")
+            filename = f"Ishonchnoma_{apt}.pdf"
+            caption = f"{apt}-xona Ishonchnoma"
+        elif ft == "cad":
+            file_id = APT_CAD.get(apt, "")
+            filename = f"Kadastr_{apt}.pdf"
+            caption = f"{apt}-xona Kadastr"
+        else:
+            raise HTTPException(400, "Noto'g'ri file_type")
+
+        if not file_id:
+            raise HTTPException(404, f"{apt} uchun fayl ID topilmadi")
+
+        file_bytes = await asyncio.to_thread(get_drive_file, file_id)
+        tg_send_file(chat_id, file_bytes, filename, caption)
+        return {"success": True}
+    except HTTPException: raise
+    except Exception as e:
+        raise HTTPException(500, str(e))
+
+
+@app.get('/bnb/history')
+def bnb_history():
+    try:
+        from bnb_services import get_bnb_history
+        return {"success": True, "data": get_bnb_history()}
+    except Exception as e:
+        raise HTTPException(500, str(e))
