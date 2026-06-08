@@ -113,23 +113,3 @@ def save_bnb_to_sheets(registration):
             datetime.now().strftime("%Y-%m-%d %H:%M"),
         ]
         ws.append_row(row, value_input_option="RAW")
-
-def get_bnb_history():
-    import gspread
-    gc = gspread.authorize(_drive_creds())
-    sh = gc.open_by_key(BNB_SHEETS_ID)
-    ws = sh.sheet1
-    rows = ws.get_all_values()
-    if len(rows) < 2: return []
-    result = []
-    for row in rows[1:]:
-        def v(i): return row[i].strip() if i < len(row) else ""
-        result.append({
-            "apartment":    v(9),
-            "guestName":    v(1),
-            "nationality":  v(2),
-            "aptEntryDate": v(5),
-            "departureDate": v(6),
-            "createdAt":    v(13),
-        })
-    return list(reversed(result))

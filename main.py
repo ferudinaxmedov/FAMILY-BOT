@@ -9,6 +9,7 @@ from io import BytesIO
 import pytz
 import gspread
 from google.oauth2.service_account import Credentials
+import store
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, ReplyKeyboardMarkup
 from telegram.ext import (
     Application, CommandHandler, CallbackQueryHandler,
@@ -73,30 +74,33 @@ def num_clean(s):
         return float(s) if s else 0.0
     except: return 0.0
 
-def get_balance():
+async def _mirror(label, fn, *args, **kwargs):
+    """Sheets-ga fon rejimida (best-effort) yozish — xato bo'lsa faqat log,
+    bot hech qachon Sheets tufayli to'xtamaydi."""
     try:
-        ss = get_ss()
-        for sheet, cell in [('KUNLIK_VIEW','E2'),('DASHBOARD','B2')]:
-            try:
-                raw = ss.worksheet(sheet).acell(cell).value
-                if not raw: continue
-                v = num_clean(raw)
-                if v > 0: return v
-            except Exception as e: logger.error(f'bal {sheet}: {e}')
-        return 0.0
+        await asyncio.to_thread(fn, *args, **kwargs)
+    except Exception as e:
+        logger.error(f'[sheets-mirror] {label}: {e}')
+
+def _mirror_task(label, fn, *args, **kwargs):
+    asyncio.create_task(_mirror(label, fn, *args, **kwargs))
+
+# Supabase — ASOSIY o'qish/yozish manbai. Sheets — har yozuvdan keyin
+# fon vazifasi orqali doimiy ko'chiriladigan zaxira nusxa.
+async def get_balance():
+    """Returns (balance_usd, balance_uzs) — KIRIM minus CHIQIM, valyuta bo'yicha."""
+    try:
+        return await store.get_balance()
     except Exception as e:
         logger.error(f'get_balance: {e}')
-        return 0.0
+        return 0.0, 0.0
 
-def save_row(sheet_name, st):
-    sh       = get_ss().worksheet(sheet_name)
-    now_dt   = datetime.now(TZ)
-    today    = now_dt.strftime('%d.%m.%Y')
-    now_t    = now_dt.strftime('%H:%M')
-    usd_val  = float(st['summa']) if st['valyuta'] == 'USD' else ''
-    uzs_val  = float(st['summa']) if st['valyuta'] == 'UZS' else ''
-    col_c    = sh.col_values(3)
-    last     = 2
+def _sheets_save_row(sheet_name, st, today, now_t):
+    sh      = get_ss().worksheet(sheet_name)
+    usd_val = float(st['summa']) if st['valyuta'] == 'USD' else ''
+    uzs_val = float(st['summa']) if st['valyuta'] == 'UZS' else ''
+    col_c   = sh.col_values(3)
+    last    = 2
     for i, v in enumerate(col_c):
         if i < 2: continue
         if v and str(v).strip(): last = i + 1
@@ -106,8 +110,19 @@ def save_row(sheet_name, st):
         st['tolov'], usd_val, uzs_val, now_t
     ]], value_input_option='USER_ENTERED')
     sh.update(f'J{new_row}', [[st.get('note','')]])
-    logger.info(f'Saved to {sheet_name} row {new_row}')
-    return new_row
+    logger.info(f'[sheets-mirror] {sheet_name} row {new_row} saqlandi')
+
+async def save_row(sheet_name, st):
+    now_dt  = datetime.now(TZ)
+    today   = now_dt.strftime('%d.%m.%Y')
+    now_t   = now_dt.strftime('%H:%M')
+    usd_val = st['summa'] if st['valyuta'] == 'USD' else 0
+    uzs_val = st['summa'] if st['valyuta'] == 'UZS' else 0
+    new_id  = await store.add_transaction(
+        sheet_name, today, st['egasi'], st['tur'], st['tolov'],
+        usd_val, uzs_val, now_t, st.get('note', ''))
+    _mirror_task(f'save_row:{sheet_name}', _sheets_save_row, sheet_name, st, today, now_t)
+    return new_id
 
 def norm_date(s):
     s = str(s).strip()
@@ -138,7 +153,7 @@ def smstr(st):
 def confirm_text(st, bal=None):
     lbl     = 'CHIQIM' if st['type'] == 'CHIQIM' else 'KIRIM'
     ico     = '📤' if st['type'] == 'CHIQIM' else '📥'
-    bal_str = f"{round(float(bal),2)}$" if bal is not None else '—'
+    bal_str = sstr(*bal) if bal is not None else '—'
     return (
         f"{ico} <b>{today_str()}</b>\n\n"
         f"▪️ {lbl} TURI: <b>{st['tur']}</b>\n"
@@ -150,73 +165,19 @@ def confirm_text(st, bal=None):
         f"💰 BALANCE: <b>{bal_str}</b>"
     )
 
-def get_bugun():
-    today = today_str()
-    ss    = get_ss()
-    r     = dict(ch=[], ki=[], chU=0.0, chZ=0.0, kiU=0.0, kiZ=0.0)
-    for sname, target in [('CHIQIM','ch'),('KIRIM','ki')]:
-        try:
-            sh    = ss.worksheet(sname)
-            dates = sh.col_values(3); turs = sh.col_values(5)
-            usds  = sh.col_values(7); uzss = sh.col_values(8)
-            n = max(len(dates), len(turs))
-            for i in range(2, n):
-                d = str(dates[i]).strip() if i < len(dates) else ''
-                if not d or norm_date(d) != today: continue
-                tur = str(turs[i]).strip() if i < len(turs) else ''
-                if not tur: continue
-                u = num_clean(usds[i] if i < len(usds) else '')
-                z = num_clean(uzss[i] if i < len(uzss) else '')
-                item = {'tur': tur, 'usd': u, 'uzs': z}
-                if target == 'ch':
-                    r['ch'].append(item); r['chU'] += u; r['chZ'] += z
-                else:
-                    r['ki'].append(item); r['kiU'] += u; r['kiZ'] += z
-        except Exception as e: logger.error(f'get_bugun {sname}: {e}')
-    return r
+async def get_bugun():
+    try:
+        return await store.get_bugun(today_str())
+    except Exception as e:
+        logger.error(f'get_bugun: {e}')
+        return dict(ch=[], ki=[], chU=0.0, chZ=0.0, kiU=0.0, kiZ=0.0)
 
-def get_filtered(tip, davr, tur, date_from=None, date_to=None):
-    now = datetime.now(TZ)
-    ss  = get_ss()
-    sh  = ss.worksheet(tip)
-    dates=sh.col_values(3); turs=sh.col_values(5); egasi_col=sh.col_values(4)
-    usds=sh.col_values(7);  uzss=sh.col_values(8); notes=sh.col_values(10)
-    n=max(len(dates),len(turs)); result=[]; total_usd=0.0; total_uzs=0.0
-    dt_from=None; dt_to=None
-    if date_from:
-        try: dt_from=datetime.strptime(date_from,'%d.%m.%Y')
-        except: pass
-    if date_to:
-        try: dt_to=datetime.strptime(date_to,'%d.%m.%Y')
-        except: pass
-    for i in range(2, n):
-        d=str(dates[i]).strip() if i<len(dates) else ''
-        if not d: continue
-        nd=norm_date(d)
-        if not nd: continue
-        try: dt=datetime.strptime(nd,'%d.%m.%Y')
-        except: continue
-        if davr=='bu_oy':
-            if dt.month!=now.month or dt.year!=now.year: continue
-        elif davr=='otgan_oy':
-            prev=now.month-1 if now.month>1 else 12
-            prev_y=now.year if now.month>1 else now.year-1
-            if dt.month!=prev or dt.year!=prev_y: continue
-        elif davr=='bu_yil':
-            if dt.year!=now.year: continue
-        elif davr=='custom':
-            if dt_from and dt<dt_from: continue
-            if dt_to   and dt>dt_to:   continue
-        t=str(turs[i]).strip() if i<len(turs) else ''
-        if not t: continue
-        if tur!='BARCHASI' and t!=tur: continue
-        u=num_clean(usds[i] if i<len(usds) else '')
-        z=num_clean(uzss[i] if i<len(uzss) else '')
-        eg=str(egasi_col[i]).strip() if i<len(egasi_col) else ''
-        nt=str(notes[i]).strip() if i<len(notes) else ''
-        result.append({'sana':nd,'tur':t,'egasi':eg,'usd':u,'uzs':z,'note':nt})
-        total_usd+=u; total_uzs+=z
-    return result, total_usd, total_uzs
+async def get_filtered(tip, davr, tur, date_from=None, date_to=None):
+    try:
+        return await store.get_filtered(tip, davr, tur, date_from, date_to, now=datetime.now(TZ))
+    except Exception as e:
+        logger.error(f'get_filtered: {e}')
+        return [], 0.0, 0.0
 
 async def delete_messages(bot, chat_id, msg_ids):
     for mid in msg_ids:
@@ -226,76 +187,36 @@ async def delete_messages(bot, chat_id, msg_ids):
 # ══════════════════════════════════════════════════════════
 # KATEGORIYALAR — SETTINGS VARAQI
 # ══════════════════════════════════════════════════════════
+def _sheets_save_categories(chiqim, kirim):
+    sh = get_ss()
+    try: ws = sh.worksheet('SETTINGS')
+    except Exception:
+        ws = sh.add_worksheet(title='SETTINGS', rows=100, cols=10)
+        ws.update('A1', [['kalit','qiymat']])
+    ws.update('A2', [['chiqim_turs', json.dumps(chiqim)]])
+    ws.update('A3', [['kirim_turs',  json.dumps(kirim)]])
+
 async def load_categories():
-    """SETTINGS varag'idan kategoriyalarni yuklash"""
+    """Supabase'dan (asosiy) kategoriyalarni yuklash; bo'sh bo'lsa default."""
     try:
-        sh = get_ss()
-        try: ws = sh.worksheet('SETTINGS')
-        except Exception:
-            ws = sh.add_worksheet(title='SETTINGS', rows=100, cols=10)
-            ws.update('A1', [['kalit','qiymat']])
-            ws.update('A2', [['chiqim_turs', json.dumps(DEFAULT_CHIQIM)]])
-            ws.update('A3', [['kirim_turs',  json.dumps(DEFAULT_KIRIM)]])
-            logger.info('SETTINGS varag\'i yaratildi')
-        records = ws.get_all_values()
-        for row in records[1:]:
-            if len(row) < 2: continue
-            key, val = row[0], row[1]
-            if key == 'chiqim_turs':
-                try: _cats['chiqim'] = json.loads(val)
-                except: pass
-            elif key == 'kirim_turs':
-                try: _cats['kirim'] = json.loads(val)
-                except: pass
+        chiqim, kirim = await store.load_categories()
+        _cats['chiqim'] = chiqim or DEFAULT_CHIQIM[:]
+        _cats['kirim']  = kirim  or DEFAULT_KIRIM[:]
     except Exception as e:
         logger.error(f'load_categories: {e}')
+        _cats['chiqim'] = _cats['chiqim'] or DEFAULT_CHIQIM[:]
+        _cats['kirim']  = _cats['kirim']  or DEFAULT_KIRIM[:]
 
 async def save_categories():
     try:
-        sh = get_ss()
-        try: ws = sh.worksheet('SETTINGS')
-        except Exception:
-            ws = sh.add_worksheet(title='SETTINGS', rows=100, cols=10)
-            ws.update('A1', [['kalit','qiymat']])
-        ws.update('A2', [['chiqim_turs', json.dumps(_cats.get('chiqim', DEFAULT_CHIQIM))]])
-        ws.update('A3', [['kirim_turs',  json.dumps(_cats.get('kirim',  DEFAULT_KIRIM))]])
+        chiqim = _cats.get('chiqim', DEFAULT_CHIQIM)
+        kirim  = _cats.get('kirim',  DEFAULT_KIRIM)
+        await store.save_categories(chiqim, kirim)
+        _mirror_task('save_categories', _sheets_save_categories, chiqim, kirim)
         return True
     except Exception as e:
         logger.error(f'save_categories: {e}')
         return False
-
-# ══════════════════════════════════════════════════════════
-# QARZ TIZIMI — GOOGLE SHEETS
-# ══════════════════════════════════════════════════════════
-async def ensure_qarz():
-    """QARZ varag'i mavjudligini ta'minlash"""
-    try:
-        sh = get_ss()
-        try: sh.worksheet('QARZ')
-        except Exception:
-            ws = sh.add_worksheet(title='QARZ', rows=500, cols=12)
-            ws.update('A1:J1', [[
-                'raqam','tur','kim','summa_uzs','summa_usd',
-                'sana','muddat','holat','qaytarilgan_sana','note'
-            ]])
-            logger.info('QARZ varag\'i yaratildi')
-    except Exception as e:
-        logger.error(f'ensure_qarz: {e}')
-
-def get_qarz_ws(): return get_ss().worksheet('QARZ')
-
-def qarz_to_list(rows):
-    if len(rows) < 2: return []
-    headers = rows[0]
-    result  = []
-    for i, row in enumerate(rows[1:], start=2):
-        row_p = row + [''] * (len(headers) - len(row))
-        d = dict(zip(headers, row_p))
-        d['_row'] = i
-        result.append(d)
-    return result
-
-def qarz_aktiv(lst): return [r for r in lst if r.get('holat','').upper() == 'AKTIV']
 
 # ══════════════════════════════════════════════════════════
 # KLAVIATURALAR
@@ -527,7 +448,7 @@ async def hisobot_tur(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         lbl = 'CHIQIM' if tip=='CHIQIM' else 'KIRIM'
         ico = '📤' if tip=='CHIQIM' else '📥'
         await q.message.reply_text('⏳ Hisobot tayyorlanmoqda...')
-        rows, total_usd, total_uzs = get_filtered(tip, davr, tur, df, dt)
+        rows, total_usd, total_uzs = await get_filtered(tip, davr, tur, df, dt)
         if not rows:
             txt = f"🔍 <b>{ico} {lbl}</b>\nDavr: <b>{davr_txt}</b>\nTur: <b>{tur_txt}</b>\n\n📭 Ma'lumot topilmadi."
         else:
@@ -567,12 +488,12 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         ud['msgs'].append(m.message_id); return TUR
     if d == 'MB':
         await q.message.reply_text('⏳ Balans tekshirilmoqda...')
-        bal = get_balance()
-        await q.message.reply_text(f'💰 <b>Joriy balans: {round(bal,2)}$</b>', parse_mode='HTML')
+        bal = await get_balance()
+        await q.message.reply_text(f'💰 <b>Joriy balans: {sstr(*bal)}</b>', parse_mode='HTML')
         return ConversationHandler.END
     if d == 'MG':
         await q.message.reply_text("⏳ Ma'lumotlar yuklanmoqda...")
-        dv  = get_bugun()
+        dv  = await get_bugun()
         txt = f'📅 <b>{today_str()}</b>\n\n<b>📤 Chiqimlar:</b>\n'
         txt += ('\n'.join(f'  • {c["tur"]}: {sstr(c["usd"],c["uzs"])}' for c in dv['ch'])) or "  Yo'q"
         txt += '\n\n<b>📥 Kirimlar:</b>\n'
@@ -581,10 +502,10 @@ async def btn(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return ConversationHandler.END
     if d == 'MS':
         await q.message.reply_text('⏳ Statistika yuklanmoqda...')
-        dv  = get_bugun()
-        bal = get_balance()
+        dv  = await get_bugun()
+        bal = await get_balance()
         txt = (f'📊 <b>Statistika</b>\n\n'
-               f'💰 Balans: <b>{round(bal,2)}$</b>\n'
+               f'💰 Balans: <b>{sstr(*bal)}</b>\n'
                f'Bugungi chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>\n'
                f'Bugungi kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>')
         await q.message.reply_text(txt, parse_mode='HTML')
@@ -658,8 +579,8 @@ async def _finalize(message, ctx):
             await message.reply_text('Qaytadan boshlang.', reply_markup=kb_reply_main())
             return
         m_wait = await message.reply_text('⏳ Saqlanmoqda...')
-        save_row(st['type'], st)
-        bal  = get_balance()
+        await save_row(st['type'], st)
+        bal  = await get_balance()
         txt  = confirm_text(st, bal)
         msgs = list(st.get('msgs',[]))
         msgs.append(m_wait.message_id)
@@ -690,24 +611,24 @@ async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     text = (update.message.text or '').strip()
     kb   = kb_reply_main()
     if text == '💰 Balans':
-        bal = get_balance()
+        bal = await get_balance()
         await update.message.reply_text(
-            f'💰 <b>Joriy balans: {round(bal,2)}$</b>',
+            f'💰 <b>Joriy balans: {sstr(*bal)}</b>',
             parse_mode='HTML', reply_markup=kb)
     elif text == '📅 Bugun':
         await update.message.reply_text("⏳ Yuklanmoqda...", reply_markup=kb)
-        dv  = get_bugun()
+        dv  = await get_bugun()
         txt = f'📅 <b>{today_str()}</b>\n\n<b>📤 Chiqimlar:</b>\n'
         txt += ('\n'.join(f'  • {c["tur"]}: {sstr(c["usd"],c["uzs"])}' for c in dv['ch'])) or "  Yo'q"
         txt += '\n\n<b>📥 Kirimlar:</b>\n'
         txt += ('\n'.join(f'  • {k["tur"]}: {sstr(k["usd"],k["uzs"])}' for k in dv['ki'])) or "  Yo'q"
         await update.message.reply_text(txt, parse_mode='HTML', reply_markup=kb)
     elif text == '📊 Statistika':
-        dv  = get_bugun()
-        bal = get_balance()
+        dv  = await get_bugun()
+        bal = await get_balance()
         await update.message.reply_text(
             f'📊 <b>Statistika</b>\n\n'
-            f'💰 Balans: <b>{round(bal,2)}$</b>\n'
+            f'💰 Balans: <b>{sstr(*bal)}</b>\n'
             f'Bugungi chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>\n'
             f'Bugungi kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>',
             parse_mode='HTML', reply_markup=kb)
@@ -804,6 +725,37 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             logger.error(f'handle_photo: {e}')
 
 
+def _sheets_namoz_times_save(year, month, days):
+    """NAMOZ_TIMES sahifasida shu oyga oid qatorlarni almashtiradi (zaxira)."""
+    sh = get_ss()
+    try:
+        ws = sh.worksheet('NAMOZ_TIMES')
+    except Exception:
+        ws = sh.add_worksheet(title='NAMOZ_TIMES', rows=400, cols=10)
+        ws.update('A1:I1', [['year','month','day','bomdod','quyosh','peshin','asr','shom','xufton']])
+    all_rows = ws.get_all_values()
+    rows_to_keep = [all_rows[0]] if all_rows else [['year','month','day','bomdod','quyosh','peshin','asr','shom','xufton']]
+    for row in all_rows[1:]:
+        if len(row) >= 3:
+            try:
+                if int(row[0]) == year and int(row[1]) == month:
+                    continue
+            except Exception:
+                pass
+        rows_to_keep.append(row)
+    ws.clear()
+    if rows_to_keep:
+        ws.update('A1', rows_to_keep)
+    for day_str, times in days.items():
+        try: day_n = int(day_str)
+        except Exception: continue
+        ws.append_row([
+            year, month, day_n,
+            times.get('bomdod') or '', times.get('quyosh') or '',
+            times.get('peshin') or '', times.get('asr') or '',
+            times.get('shom') or '', times.get('xufton') or '',
+        ], value_input_option='USER_ENTERED')
+
 async def handle_namoz_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
                               msg, image_b64: str, media_type: str):
     """Namoz vaqtlari rasmini analiz qilib NAMOZ_TIMES varag'iga saqlash"""
@@ -845,40 +797,16 @@ async def handle_namoz_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
             await msg.edit_text("❌ Jadvaldan ma'lumot o'qib bo'lmadi. Aniqroq rasm yuboring.")
             return
 
-        sh = get_ss()
-        try:
-            ws = sh.worksheet('NAMOZ_TIMES')
-        except Exception:
-            ws = sh.add_worksheet(title='NAMOZ_TIMES', rows=400, cols=10)
-            ws.update('A1:I1', [['year','month','day','bomdod','quyosh','peshin','asr','shom','xufton']])
-
         year = now.year
-        # Mavjud oy ma'lumotlarini o'chir
-        all_rows = ws.get_all_values()
-        rows_to_keep = [all_rows[0]] if all_rows else [['year','month','day','bomdod','quyosh','peshin','asr','shom','xufton']]
-        for row in all_rows[1:]:
-            if len(row) >= 3:
-                try:
-                    if int(row[0]) == year and int(row[1]) == month:
-                        continue
-                except Exception:
-                    pass
-            rows_to_keep.append(row)
-        ws.clear()
-        if rows_to_keep:
-            ws.update('A1', rows_to_keep)
-
-        # Yangi ma'lumotlarni qo'sh
-        for day_str, times in days.items():
-            ws.append_row([
-                year, month, int(day_str),
-                times.get('bomdod') or '',
-                times.get('quyosh') or '',
-                times.get('peshin') or '',
-                times.get('asr')    or '',
-                times.get('shom')   or '',
-                times.get('xufton') or '',
-            ], value_input_option='USER_ENTERED')
+        rows = []
+        for day_str, t in days.items():
+            try: day_n = int(day_str)
+            except Exception: continue
+            rows.append({'day': day_n, 'bomdod': t.get('bomdod') or '', 'quyosh': t.get('quyosh') or '',
+                         'peshin': t.get('peshin') or '', 'asr': t.get('asr') or '',
+                         'shom': t.get('shom') or '', 'xufton': t.get('xufton') or ''})
+        await store.namoz_times_save(year, month, rows)
+        _mirror_task('namoz_times_save', _sheets_namoz_times_save, year, month, days)
 
         month_names = {
             1:'Yanvar',2:'Fevral',3:'Mart',4:'Aprel',5:'May',6:'Iyun',
@@ -1162,7 +1090,6 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     d   = q.data
 
     if d in ('QARZ_MENU', 'QARZ_BACK'):
-        await ensure_qarz()
         kb = InlineKeyboardMarkup([
             [InlineKeyboardButton('➕ Qarz berish',  callback_data='QARZ_ADD_BER'),
              InlineKeyboardButton('➕ Qarz olish',   callback_data='QARZ_ADD_OL')],
@@ -1191,11 +1118,8 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if d == 'QARZ_LIST':
-        await ensure_qarz()
         try:
-            ws   = get_qarz_ws()
-            rows = ws.get_all_values()
-            lst  = qarz_aktiv(qarz_to_list(rows))
+            lst = await store.qarz_active()
             if not lst:
                 await q.edit_message_text('📭 Faol qarzlar yo\'q.',
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Orqaga',callback_data='QARZ_BACK')]]))
@@ -1220,11 +1144,8 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if d == 'QARZ_QAYT':
-        await ensure_qarz()
         try:
-            ws   = get_qarz_ws()
-            rows = ws.get_all_values()
-            lst  = qarz_aktiv(qarz_to_list(rows))
+            lst = await store.qarz_active()
             if not lst:
                 await q.edit_message_text('📭 Qaytaradigan faol qarzlar yo\'q.',
                     reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton('🔙 Orqaga',callback_data='QARZ_BACK')]]))
@@ -1233,7 +1154,7 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
             for r in lst:
                 s   = _qarz_sum(r)
                 lbl = f"{'→' if r['tur']=='BERILGAN' else '←'} {r['kim']} ({s})"
-                buttons.append([InlineKeyboardButton(lbl, callback_data=f"QARZ_DONE_{r['_row']}")])
+                buttons.append([InlineKeyboardButton(lbl, callback_data=f"QARZ_DONE_{r['_id']}")])
             buttons.append([InlineKeyboardButton('🔙 Orqaga',callback_data='QARZ_BACK')])
             await q.edit_message_text('✅ <b>Qaysi qarz qaytarildi?</b>',
                 parse_mode='HTML', reply_markup=InlineKeyboardMarkup(buttons))
@@ -1242,45 +1163,35 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         return
 
     if d.startswith('QARZ_DONE_'):
-        row_idx = int(d.split('_')[-1])
+        qarz_id = d[len('QARZ_DONE_'):]
         try:
-            ws    = get_qarz_ws()
             today = today_str()
+            r = await store.qarz_get(qarz_id)
+            if not r:
+                await q.edit_message_text("⚠️ Bu qarz topilmadi (ehtimol allaqachon yopilgan).")
+                return
+            tur       = r['tur']
+            kim       = r['kim']
+            summa_uzs = r.get('summa_uzs')
+            summa_usd = r.get('summa_usd')
 
-            # Qarz ma'lumotlarini olish
-            row       = ws.row_values(row_idx)
-            tur       = row[1] if len(row) > 1 else 'BERILGAN'
-            kim       = row[2] if len(row) > 2 else '?'
-            summa_uzs = row[3] if len(row) > 3 and row[3] and str(row[3]).strip() else None
-            summa_usd = row[4] if len(row) > 4 and row[4] and str(row[4]).strip() else None
-
-            # QARZ ni TUGADI deb belgilash
-            ws.update_cell(row_idx, 8, 'TUGADI')
-            ws.update_cell(row_idx, 9, today)
+            await store.qarz_close(qarz_id, today)
 
             egasi = 'FERUDIN'
             if tur == 'BERILGAN':
-                try:
-                    await asyncio.to_thread(
-                        qarz_to_sheet, 'KIRIM', egasi, summa_usd, summa_uzs,
-                        f'Qarz qaytdi: {kim}', 'QARZ QAYTIB KELDI')
-                    logger.info(f'QARZ_DONE KIRIM OK: {kim}')
-                except Exception as se:
-                    logger.error(f'QARZ_DONE KIRIM FAILED: {se}')
+                await _record_qarz_transaction(
+                    'KIRIM', egasi, summa_usd, summa_uzs,
+                    f'Qarz qaytdi: {kim}', 'QARZ QAYTIB KELDI')
                 icon   = '✅💰'
                 effect = "Balansga qaytdi (+)"
             else:
-                try:
-                    await asyncio.to_thread(
-                        qarz_to_sheet, 'CHIQIM', egasi, summa_usd, summa_uzs,
-                        f'Qarz qaytarildi: {kim}', 'QARZ QAYTARILDI')
-                    logger.info(f'QARZ_DONE CHIQIM OK: {kim}')
-                except Exception as se:
-                    logger.error(f'QARZ_DONE CHIQIM FAILED: {se}')
+                await _record_qarz_transaction(
+                    'CHIQIM', egasi, summa_usd, summa_uzs,
+                    f'Qarz qaytarildi: {kim}', 'QARZ QAYTARILDI')
                 icon   = '✅💸'
                 effect = "Balansdan ayrildi (−)"
 
-            bal = get_balance()
+            bal = await get_balance()
             s_uzs = f"{float(summa_uzs):,.0f} UZS" if summa_uzs else ''
             s_usd = f"{float(summa_usd):.2f} USD"   if summa_usd else ''
             summa_str = ' / '.join(filter(None, [s_uzs, s_usd])) or '?'
@@ -1290,18 +1201,15 @@ async def qarz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 f'💰 {summa_str}\n'
                 f'📅 {today}\n'
                 f'<i>{effect}</i>\n'
-                f'💰 Joriy balans: <b>{round(bal, 2)}$</b>',
+                f'💰 Joriy balans: <b>{sstr(*bal)}</b>',
                 parse_mode='HTML')
         except Exception as e:
             await q.edit_message_text(f'❌ Xatolik: {e}')
         return
 
     if d == 'QARZ_STAT':
-        await ensure_qarz()
         try:
-            ws   = get_qarz_ws()
-            rows = ws.get_all_values()
-            lst  = qarz_aktiv(qarz_to_list(rows))
+            lst = await store.qarz_active()
             ber_uzs = sum(float(r['summa_uzs']) for r in lst if r['tur']=='BERILGAN' and r.get('summa_uzs'))
             ber_usd = sum(float(r['summa_usd']) for r in lst if r['tur']=='BERILGAN' and r.get('summa_usd'))
             ol_uzs  = sum(float(r['summa_uzs']) for r in lst if r['tur']=='OLINGAN'  and r.get('summa_uzs'))
@@ -1379,7 +1287,17 @@ async def qarz_input(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         await _qarz_save(update, q)
         ctx.user_data.pop('qarz_new', None)
 
-def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str, tur: str = None) -> int:
+async def _record_qarz_transaction(sheet_name, egasi, usd_val, uzs_val, note, tur):
+    """Qarz natijasida balansga ta'sir qiluvchi tranzaksiya: Supabase (asosiy) + Sheets (zaxira)."""
+    now_dt = datetime.now(TZ)
+    today  = now_dt.strftime('%d.%m.%Y')
+    now_t  = now_dt.strftime('%H:%M')
+    usd_v  = usd_val or 0
+    uzs_v  = uzs_val or 0
+    await store.add_transaction(sheet_name, today, egasi, tur, 'CASH', usd_v, uzs_v, now_t, note)
+    _mirror_task(f'qarz_tx:{sheet_name}', _sheets_qarz_to_sheet, sheet_name, egasi, usd_val, uzs_val, note, tur)
+
+def _sheets_qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str, tur: str = None) -> int:
     if tur is None:
         tur = 'QARZ BERILDI' if sheet_name == 'CHIQIM' else 'QARZ OLINDI'
 
@@ -1405,46 +1323,40 @@ def qarz_to_sheet(sheet_name: str, egasi: str, usd_val, uzs_val, note: str, tur:
     logger.info(f'SAQLANDI: {sheet_name} row {new_row}')
     return new_row
 
+def _sheets_qarz_append(q, today):
+    ws   = get_ss().worksheet('QARZ')
+    rows = ws.get_all_values()
+    num  = len(rows)
+    ws.append_row([
+        num, q['tur'], q['kim'],
+        q.get('summa_uzs',''), q.get('summa_usd',''),
+        today, q['muddat'], 'AKTIV', '', q.get('note','')
+    ], value_input_option='USER_ENTERED')
+
 async def _qarz_save(update, q: dict):
     try:
-        await ensure_qarz()
-        ws    = get_qarz_ws()
-        rows  = ws.get_all_values()
-        num   = len(rows)
         today = today_str()
-        ws.append_row([
-            num, q['tur'], q['kim'],
-            q.get('summa_uzs',''), q.get('summa_usd',''),
-            today, q['muddat'], 'AKTIV', '', q.get('note','')
-        ], value_input_option='USER_ENTERED')
-
         tur   = q['tur']
         egasi = 'FERUDIN'
         usd_v = q.get('summa_usd') or None
         uzs_v = q.get('summa_uzs') or None
 
+        await store.qarz_add(tur, q['kim'], q.get('summa_uzs') or None, q.get('summa_usd') or None,
+                             today, q['muddat'], q.get('note', ''))
+        _mirror_task('qarz_append', _sheets_qarz_append, q, today)
+
         if tur == 'BERILGAN':
-            try:
-                await asyncio.to_thread(
-                    qarz_to_sheet, 'CHIQIM', egasi, usd_v, uzs_v,
-                    f"Qarz berildi: {q['kim']}", 'QARZ BERILDI')
-            except Exception as se:
-                logger.error(f"qarz_to_sheet CHIQIM FAILED: {se}")
-                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}', reply_markup=kb_reply_main())
+            await _record_qarz_transaction('CHIQIM', egasi, usd_v, uzs_v,
+                f"Qarz berildi: {q['kim']}", 'QARZ BERILDI')
             icon   = '💸'
             effect = "Balansdan ayrildi (−)"
         else:
-            try:
-                await asyncio.to_thread(
-                    qarz_to_sheet, 'KIRIM', egasi, usd_v, uzs_v,
-                    f"Qarz olindi: {q['kim']}", 'QARZ OLINDI')
-            except Exception as se:
-                logger.error(f"qarz_to_sheet KIRIM FAILED: {se}")
-                await update.message.reply_text(f'⚠️ Balans yangilashda xato: {str(se)[:80]}', reply_markup=kb_reply_main())
+            await _record_qarz_transaction('KIRIM', egasi, usd_v, uzs_v,
+                f"Qarz olindi: {q['kim']}", 'QARZ OLINDI')
             icon   = '💰'
             effect = "Balansga qo'shildi (+)"
 
-        bal = get_balance()
+        bal = await get_balance()
         arr = '→' if tur == 'BERILGAN' else '←'
         s   = _qarz_sum(q)
         await update.message.reply_text(
@@ -1453,7 +1365,7 @@ async def _qarz_save(update, q: dict):
             f'💰 {s}\n'
             f'📅 {today}  ⏰ Muddat: {q["muddat"]}\n'
             f'<i>{effect}</i>\n'
-            f'💰 Joriy balans: <b>{round(bal, 2)}$</b>'
+            f'💰 Joriy balans: <b>{sstr(*bal)}</b>'
             + (f'\n📝 {q["note"]}' if q.get('note') else ''),
             parse_mode='HTML', reply_markup=kb_reply_main())
     except Exception as e:
@@ -1467,10 +1379,7 @@ async def _qarz_save(update, q: dict):
 # ══════════════════════════════════════════════════════════
 async def qarz_notify_job(ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        await ensure_qarz()
-        ws   = get_qarz_ws()
-        rows = ws.get_all_values()
-        lst  = qarz_aktiv(qarz_to_list(rows))
+        lst = await store.qarz_active()
         today_d = date.today()
         for r in lst:
             try: deadline = datetime.strptime(r['muddat'],'%d.%m.%Y').date()
@@ -1650,7 +1559,7 @@ async def help_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def namoz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
-    times  = get_prayer_times(datetime.now(TZ).date())
+    times  = await get_prayer_times(datetime.now(TZ).date())
     now_hm = datetime.now(TZ).strftime('%H:%M')
     sana   = datetime.now(TZ).strftime('%d.%m.%Y')
     txt    = f'🕌 <b>Namoz vaqtlari — {sana}</b>\n\n'
@@ -1675,9 +1584,9 @@ async def hisobot_start_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 async def debug_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
     try:
-        bal  = get_balance()
+        bal  = await get_balance()
         rows = get_ss().worksheet('CHIQIM').get_all_values()
-        lines = [f'Balance: {bal}', f'CHIQIM: {len(rows)} qator',
+        lines = [f'Balance: {sstr(*bal)}', f'CHIQIM: {len(rows)} qator',
                  f'Kategoriyalar: {len(get_chiqim_turs())} ta']
         await update.message.reply_text('\n'.join(lines), reply_markup=kb_reply_main())
     except Exception as e:
@@ -1685,7 +1594,6 @@ async def debug_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
 async def qarz_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
-    await ensure_qarz()
     kb = InlineKeyboardMarkup([
         [InlineKeyboardButton('➕ Qarz berish',  callback_data='QARZ_ADD_BER'),
          InlineKeyboardButton('➕ Qarz olish',   callback_data='QARZ_ADD_OL')],
@@ -1711,25 +1619,30 @@ async def admin_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # TASKS + REMINDER TIZIMI
 # ══════════════════════════════════════════════════════════
 
-async def ensure_tasks_sheet():
-    try:
-        sh = get_ss()
-        try:
-            sh.worksheet('TASKS')
-        except Exception:
-            ws = sh.add_worksheet(title='TASKS', rows=1000, cols=8)
-            ws.update('A1:G1', [['id', 'yaratilgan', 'vaqt', 'matn', 'egasi', 'holat', 'chat_id']])
-    except Exception as e:
-        logger.error(f'ensure_tasks_sheet: {e}')
+def _sheets_task_append(matn, vaqt_str, egasi, chat_id, today):
+    ws   = get_ss().worksheet('TASKS')
+    vals = ws.get_all_values()
+    ws.append_row([len(vals), today, vaqt_str, matn, egasi, 'FAOL', chat_id],
+                  value_input_option='USER_ENTERED')
+
+def _sheets_task_mark(matn, egasi, status):
+    """UUID Sheets'da yo'q — qatorni matn+egasi+holat='FAOL' bo'yicha topamiz (best-effort)."""
+    ws   = get_ss().worksheet('TASKS')
+    vals = ws.get_all_values()
+    for i, row in enumerate(vals[1:], start=2):
+        if len(row) >= 6 and row[3] == matn and row[4] == egasi and row[5] == 'FAOL':
+            ws.update_cell(i, 6, status)
+            return
+    logger.warning(f"_sheets_task_mark: mos vazifa topilmadi ({matn[:30]}/{egasi})")
 
 async def task_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
     d       = ctx.job.data
     matn    = d['matn']
     egasi   = d['egasi']
-    row_num = d['row']
+    task_id = d['task_id']
     kb = InlineKeyboardMarkup([[
-        InlineKeyboardButton('✅ Bajarildi', callback_data=f'TASK_DONE_{row_num}'),
-        InlineKeyboardButton('⏭ O\'tkazish', callback_data=f'TASK_SKIP_{row_num}'),
+        InlineKeyboardButton('✅ Bajarildi', callback_data=f'TASK_DONE_{task_id}'),
+        InlineKeyboardButton('⏭ O\'tkazish', callback_data=f'TASK_SKIP_{task_id}'),
     ]])
     txt = f'⏰ <b>ESLATMA!</b>\n\n📋 {matn}\n👤 {egasi}'
     if egasi == 'FERUDIN':   targets = [CHAT_1]
@@ -1740,64 +1653,60 @@ async def task_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
         except Exception as e: logger.error(f'task_reminder {cid}: {e}')
 
 async def tasks_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q     = update.callback_query
+    q = update.callback_query
     await q.answer()
-    parts  = q.data.split('_')   # TASK_DONE_5 / TASK_SKIP_5
-    action = parts[1]
-    row_n  = int(parts[2])
-    status = 'BAJARILDI' if action == 'DONE' else 'O\'TKAZILDI'
+    d = q.data   # TASK_DONE_<uuid> / TASK_SKIP_<uuid>
+    if d.startswith('TASK_DONE_'):
+        action, task_id = 'DONE', d[len('TASK_DONE_'):]
+    else:
+        action, task_id = 'SKIP', d[len('TASK_SKIP_'):]
+    status = 'BAJARILDI' if action == 'DONE' else "O'TKAZILDI"
     icon   = '✅' if action == 'DONE' else '⏭'
-    def _upd():
-        get_ss().worksheet('TASKS').update_cell(row_n, 6, status)
     try:
-        await asyncio.to_thread(_upd)
+        t = await store.task_get(task_id)
+        if not t:
+            await q.edit_message_text("⚠️ Bu vazifa topilmadi (ehtimol allaqachon belgilangan).")
+            return
+        await store.task_mark(task_id, status)
+        _mirror_task('task_mark', _sheets_task_mark, t['matn'], t['egasi'], status)
         old = q.message.text or ''
         await q.edit_message_text(f'{icon} <b>{status}</b>\n\n{old}', parse_mode='HTML')
     except Exception as e:
         await q.edit_message_text(f'❌ Xatolik: {e}')
 
 async def save_and_schedule_task(app_obj, matn: str, vaqt_str: str, egasi: str, chat_id: str):
-    def _save():
-        ws    = get_ss().worksheet('TASKS')
-        vals  = ws.get_all_values()
-        today = datetime.now(TZ).strftime('%d.%m.%Y')
-        new_id = len(vals)
-        ws.append_row([new_id, today, vaqt_str, matn, egasi, 'FAOL', chat_id],
-                      value_input_option='USER_ENTERED')
-        return new_id, len(vals) + 1
+    today = datetime.now(TZ).strftime('%d.%m.%Y')
     try:
-        task_id, row_num = await asyncio.to_thread(_save)
+        task_id = await store.task_add(matn, vaqt_str, egasi, chat_id, today)
+        _mirror_task('task_append', _sheets_task_append, matn, vaqt_str, egasi, chat_id, today)
         try:
             reminder_dt = TZ.localize(datetime.strptime(vaqt_str, '%d.%m.%Y %H:%M'))
         except:
-            return task_id, row_num
+            return task_id
         if reminder_dt > datetime.now(TZ):
             app_obj.job_queue.run_once(
                 task_reminder_job, when=reminder_dt,
-                data={'matn': matn, 'egasi': egasi, 'row': row_num},
+                data={'matn': matn, 'egasi': egasi, 'task_id': task_id},
                 name=f'task_{task_id}')
-        return task_id, row_num
+        return task_id
     except Exception as e:
         logger.error(f'save_and_schedule_task: {e}')
-        return None, None
+        return None
 
 async def reschedule_pending_tasks(app_obj):
     try:
-        def _get():
-            return get_ss().worksheet('TASKS').get_all_values()
-        vals = await asyncio.to_thread(_get)
-        now  = datetime.now(TZ)
+        lst   = await store.tasks_active()
+        now   = datetime.now(TZ)
         count = 0
-        for i, row in enumerate(vals[1:], start=2):
-            if len(row) < 6 or row[5] != 'FAOL': continue
+        for t in lst:
             try:
-                reminder_dt = TZ.localize(datetime.strptime(row[2], '%d.%m.%Y %H:%M'))
+                reminder_dt = TZ.localize(datetime.strptime(t['vaqt'], '%d.%m.%Y %H:%M'))
             except: continue
             if reminder_dt <= now: continue
             app_obj.job_queue.run_once(
                 task_reminder_job, when=reminder_dt,
-                data={'matn': row[3], 'egasi': row[4], 'row': i},
-                name=f'task_rs_{i}')
+                data={'matn': t['matn'], 'egasi': t['egasi'], 'task_id': t['_id']},
+                name=f"task_rs_{t['_id']}")
             count += 1
         if count: logger.info(f'Restart: {count} ta task qayta scheduled')
     except Exception as e:
@@ -1805,22 +1714,16 @@ async def reschedule_pending_tasks(app_obj):
 
 async def tasks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     if not ok(update): return
-    def _get():
-        ws    = get_ss().worksheet('TASKS')
-        vals  = ws.get_all_values()
-        today = datetime.now(TZ).date()
-        result = []
-        for row in vals[1:]:
-            if len(row) < 6 or row[5] != 'FAOL': continue
-            try:
-                dt = TZ.localize(datetime.strptime(row[2], '%d.%m.%Y %H:%M'))
-                if dt.date() >= today:
-                    result.append({'vaqt': row[2], 'matn': row[3], 'egasi': row[4]})
-            except: continue
-        result.sort(key=lambda x: x['vaqt'])
-        return result
     try:
-        tasks = await asyncio.to_thread(_get)
+        today = datetime.now(TZ).date()
+        lst   = await store.tasks_active()
+        tasks = []
+        for t in lst:
+            try:
+                dt = TZ.localize(datetime.strptime(t['vaqt'], '%d.%m.%Y %H:%M'))
+                if dt.date() >= today:
+                    tasks.append(t)
+            except: continue
         if not tasks:
             await update.message.reply_text("📋 Faol tasklar yo'q.", reply_markup=kb_reply_main())
             return
@@ -1835,47 +1738,29 @@ async def tasks_cmd(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 # MEMORY TIZIMI
 # ══════════════════════════════════════════════════════════
 
-async def ensure_memory_sheet():
-    try:
-        sh = get_ss()
-        try:
-            sh.worksheet('MEMORY')
-        except Exception:
-            ws = sh.add_worksheet(title='MEMORY', rows=1000, cols=6)
-            ws.update('A1:E1', [['id', 'sana', 'kalit', 'qiymat', 'kim']])
-    except Exception as e:
-        logger.error(f'ensure_memory_sheet: {e}')
+def _sheets_memory_save(kalit, qiymat, kim, sana):
+    """MEMORY sahifasida kalit (case-insensitive) bo'yicha topib yangilaydi, topilmasa qo'shadi."""
+    ws   = get_ss().worksheet('MEMORY')
+    vals = ws.get_all_values()
+    for i, row in enumerate(vals[1:], start=2):
+        if len(row) >= 3 and row[2].lower() == kalit.lower():
+            ws.update(f'B{i}:E{i}', [[sana, kalit, qiymat, kim]])
+            return
+    ws.append_row([len(vals), sana, kalit, qiymat, kim], value_input_option='USER_ENTERED')
 
 async def memory_save(kalit: str, qiymat: str, kim: str) -> str:
-    def _save():
-        ws    = get_ss().worksheet('MEMORY')
-        vals  = ws.get_all_values()
-        today = datetime.now(TZ).strftime('%d.%m.%Y')
-        for i, row in enumerate(vals[1:], start=2):
-            if len(row) >= 3 and row[2].lower() == kalit.lower():
-                ws.update(f'B{i}:E{i}', [[today, kalit, qiymat, kim]])
-                return 'yangilandi'
-        ws.append_row([len(vals), today, kalit, qiymat, kim])
-        return 'saqlandi'
+    today = today_str()
     try:
-        return await asyncio.to_thread(_save)
+        action = await store.memory_save(kalit, qiymat, kim, today)
+        _mirror_task('memory_save', _sheets_memory_save, kalit, qiymat, kim, today)
+        return action
     except Exception as e:
         logger.error(f'memory_save: {e}')
         return 'xato'
 
 async def memory_search(query: str) -> list:
-    def _search():
-        ws  = get_ss().worksheet('MEMORY')
-        q   = query.lower()
-        out = []
-        for row in ws.get_all_values()[1:]:
-            if len(row) < 4: continue
-            if q in row[2].lower() or q in row[3].lower():
-                out.append({'kalit': row[2], 'qiymat': row[3],
-                            'kim': row[4] if len(row) > 4 else '', 'sana': row[1]})
-        return out
     try:
-        return await asyncio.to_thread(_search)
+        return await store.memory_search(query)
     except Exception as e:
         logger.error(f'memory_search: {e}')
         return []
@@ -1992,48 +1877,21 @@ NAMOZ_UZ    = ['bomdod', 'peshin', 'asr', 'shom', 'xufton']
 NAMOZ_COL   = {'bomdod': 2, 'peshin': 3, 'asr': 4, 'shom': 5, 'xufton': 6}
 NAMOZ_EMOJI = {'bomdod': '🌅', 'peshin': '☀️', 'asr': '🌤', 'shom': '🌇', 'xufton': '🌙'}
 
-async def ensure_namoz_sheet():
-    try:
-        sh = get_ss()
-        try:
-            sh.worksheet('NAMOZ')
-        except Exception:
-            ws = sh.add_worksheet(title='NAMOZ', rows=1000, cols=8)
-            ws.update('A1:G1', [['sana', 'bomdod', 'peshin', 'asr', 'shom', 'xufton', 'kim']])
-            logger.info("NAMOZ varag'i yaratildi")
-    except Exception as e:
-        logger.error(f'ensure_namoz_sheet: {e}')
-
-def get_prayer_times(target_date=None) -> dict:
-    """Namoz vaqtlari: avval NAMOZ_TIMES varag'idan, bo'lmasa hardcode fallback."""
+async def get_prayer_times(target_date=None) -> dict:
+    """Namoz vaqtlari: avval Supabase (family_namoz_times) dan, bo'lmasa hardcode fallback."""
     if target_date is None:
         target_date = datetime.now(TZ).date()
     elif isinstance(target_date, str):
         try: target_date = datetime.strptime(target_date, '%d-%m-%Y').date()
         except: target_date = datetime.now(TZ).date()
 
-    # 1. Google Sheets NAMOZ_TIMES dan olish
+    # 1. Supabase family_namoz_times dan olish (asosiy manba)
     try:
-        ws   = get_ss().worksheet('NAMOZ_TIMES')
-        rows = ws.get_all_values()
-        for row in rows[1:]:
-            if len(row) < 9: continue
-            try:
-                if (int(row[0]) == target_date.year and
-                    int(row[1]) == target_date.month and
-                    int(row[2]) == target_date.day):
-                    return {
-                        'bomdod': row[3] or '',
-                        'quyosh': row[4] or '',
-                        'peshin': row[5] or '',
-                        'asr':    row[6] or '',
-                        'shom':   row[7] or '',
-                        'xufton': row[8] or '',
-                    }
-            except Exception:
-                continue
+        times = await store.namoz_times_get(target_date)
+        if times and any(times.get(k) for k in NAMOZ_UZ):
+            return {k: (times.get(k) or '') for k in ['bomdod', 'quyosh', 'peshin', 'asr', 'shom', 'xufton']}
     except Exception as e:
-        logger.warning(f'NAMOZ_TIMES read xato: {e}')
+        logger.warning(f'namoz_times_get xato: {e}')
 
     # 2. Hardcode fallback
     month = target_date.month
@@ -2104,8 +1962,8 @@ def _parse_prayer_dt(time_str: str, date_obj) -> datetime:
     h, m = map(int, time_str.split(':')[:2])
     return TZ.localize(datetime(date_obj.year, date_obj.month, date_obj.day, h, m, 0))
 
-def _save_namoz_sync(sana: str, namoz: str, kim: str, status: str):
-    col_idx  = NAMOZ_COL[namoz]
+def _sheets_namoz_log_set_all(sana, kim, statuses):
+    """UUID/PK Sheets'da yo'q — sana+kim bo'yicha qatorni topib 5 ta ustunni birdaniga yozadi."""
     ws       = get_ss().worksheet('NAMOZ')
     all_vals = ws.get_all_values()
     target_row = None
@@ -2114,26 +1972,76 @@ def _save_namoz_sync(sana: str, namoz: str, kim: str, status: str):
             target_row = i
             break
     if target_row is None:
-        next_row = len(all_vals) + 1
-        ws.update(f'A{next_row}:G{next_row}', [[sana, '', '', '', '', '', kim]])
-        target_row = next_row
-    ws.update_cell(target_row, col_idx, status)
+        target_row = len(all_vals) + 1
+    vals = [statuses.get(n, '') for n in NAMOZ_UZ]
+    ws.update(f'A{target_row}:G{target_row}', [[sana, *vals, kim]])
 
-async def save_namoz_response(sana: str, namoz: str, kim: str, status: str):
+# ── Kunlik yakuniy check-in: Xuftondan 20 daqiqa keyin, 5 vaqt birdaniga ──
+_namoz_checkin = {}   # (chat_id, sana) -> {namoz: 'OK'|'NO'|None, ...}
+
+def _kb_namoz_checkin(sana, state):
+    rows = []
+    for namoz in NAMOZ_UZ:
+        cur     = state.get(namoz)
+        ha_txt  = "✅ Ha ✓"   if cur == 'OK' else "✅ Ha"
+        yoq_txt = "❌ Yo'q ✓" if cur == 'NO' else "❌ Yo'q"
+        rows.append([
+            InlineKeyboardButton(f"{NAMOZ_EMOJI[namoz]} {namoz.upper()}", callback_data='NCHK_NOOP'),
+            InlineKeyboardButton(ha_txt,  callback_data=f'NCHK_{namoz}_OK_{sana}'),
+            InlineKeyboardButton(yoq_txt, callback_data=f'NCHK_{namoz}_NO_{sana}'),
+        ])
+    return InlineKeyboardMarkup(rows)
+
+async def prayer_checkin_job(ctx: ContextTypes.DEFAULT_TYPE):
+    sana = ctx.job.data['sana']
+    txt  = (f"🌙 <b>Kunlik namoz hisoboti — {sana}</b>\n\n"
+            f"Xufton vaqtidan 20 daqiqa o'tdi. Bugungi 5 vaqt namozni "
+            f"o'qidingizmi? Har biri uchun javob bering 👇")
+    for cid, kim in [(CHAT_1, 'FERUDIN'), (CHAT_2, 'GULOYIM')]:
+        state = {n: None for n in NAMOZ_UZ}
+        _namoz_checkin[(str(cid), sana)] = state
+        try:
+            await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML',
+                                        reply_markup=_kb_namoz_checkin(sana, state))
+        except Exception as e:
+            logger.error(f'prayer_checkin {cid}: {e}')
+
+async def namoz_checkin_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q = update.callback_query
+    d = q.data
+    if d == 'NCHK_NOOP':
+        await q.answer()
+        return
     try:
-        await asyncio.to_thread(_save_namoz_sync, sana, namoz, kim, status)
-    except Exception as e:
-        logger.error(f'save_namoz_response: {e}')
-
-async def prayer_reminder_job(ctx: ContextTypes.DEFAULT_TYPE):
-    d     = ctx.job.data
-    namoz = d['namoz']
-    vaqt  = d['vaqt']
-    txt = (f"{NAMOZ_EMOJI[namoz]} <b>{namoz.upper()}</b> namozi\n\n"
-           f"⏰ 20 daqiqadan keyin ({vaqt})\nTayyorgarlik ko'ring! 🤲")
-    for cid in [CHAT_1, CHAT_2]:
-        try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
-        except Exception as e: logger.error(f'prayer_reminder {cid}: {e}')
+        _, namoz, ans, sana = d.split('_', 3)
+    except ValueError:
+        await q.answer()
+        return
+    cid = str(update.effective_chat.id)
+    kim = 'FERUDIN' if cid == CHAT_1 else 'GULOYIM'
+    key = (cid, sana)
+    state = _namoz_checkin.setdefault(key, {n: None for n in NAMOZ_UZ})
+    state[namoz] = ans
+    await q.answer('✅ Belgilandi' if ans == 'OK' else '❌ Belgilandi')
+    try:
+        await q.edit_message_reply_markup(reply_markup=_kb_namoz_checkin(sana, state))
+    except Exception:
+        pass
+    if all(v is not None for v in state.values()):
+        statuses = {n: ("O'QILDI" if state[n] == 'OK' else "O'QILMADI") for n in NAMOZ_UZ}
+        await store.namoz_log_set_all(sana, kim, statuses)
+        _mirror_task('namoz_checkin', _sheets_namoz_log_set_all, sana, kim, statuses)
+        ok_n    = sum(1 for v in statuses.values() if v == "O'QILDI")
+        icons   = {n: ('✅' if statuses[n] == "O'QILDI" else '❌') for n in NAMOZ_UZ}
+        summary = '\n'.join(f"{NAMOZ_EMOJI[n]} {n.upper()}: {icons[n]}" for n in NAMOZ_UZ)
+        try:
+            await q.edit_message_text(
+                f"🌙 <b>Kunlik namoz hisoboti — {sana}</b>\n👤 {kim}\n\n{summary}\n\n"
+                f"📊 Jami: {ok_n}/5 o'qildi. Alloh qabul qilsin! 🤲",
+                parse_mode='HTML')
+        except Exception:
+            pass
+        _namoz_checkin.pop(key, None)
 
 async def prayer_time_job(ctx: ContextTypes.DEFAULT_TYPE):
     d     = ctx.job.data
@@ -2144,38 +2052,6 @@ async def prayer_time_job(ctx: ContextTypes.DEFAULT_TYPE):
     for cid in [CHAT_1, CHAT_2]:
         try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
         except Exception as e: logger.error(f'prayer_time {cid}: {e}')
-
-async def prayer_question_job(ctx: ContextTypes.DEFAULT_TYPE):
-    d     = ctx.job.data
-    namoz = d['namoz']
-    sana  = d['sana']
-    for cid, kim in [(CHAT_1, 'FERUDIN'), (CHAT_2, 'GULOYIM')]:
-        kb = InlineKeyboardMarkup([[
-            InlineKeyboardButton("✅ Ha, o'qidim", callback_data=f'NAMOZ_OK_{namoz}_{sana}_{cid}'),
-            InlineKeyboardButton("❌ O'qimadim",   callback_data=f'NAMOZ_NO_{namoz}_{sana}_{cid}'),
-        ]])
-        txt = f"{NAMOZ_EMOJI[namoz]} <b>{namoz.upper()}</b> namozini o'qidingizmi?"
-        try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML', reply_markup=kb)
-        except Exception as e: logger.error(f'prayer_question {cid}: {e}')
-
-async def namoz_callback(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
-    q = update.callback_query
-    await q.answer()
-    # Format: NAMOZ_OK_bomdod_01.05.2026_1938508551
-    parts = q.data.split('_')
-    if len(parts) < 5:
-        return
-    status_raw = parts[1]   # OK / NO
-    namoz      = parts[2]   # bomdod, peshin, asr, shom, xufton
-    sana       = parts[3]   # 01.05.2026
-    cid        = parts[4]   # chat_id
-    kim    = 'FERUDIN' if cid == CHAT_1 else 'GULOYIM'
-    status = "O'QILDI" if status_raw == 'OK' else "O'QILMADI"
-    icon   = '✅' if status_raw == 'OK' else '❌'
-    await save_namoz_response(sana, namoz, kim, status)
-    await q.edit_message_text(
-        f'{icon} <b>{namoz.upper()}</b> — {status}\n📅 {sana} | 👤 {kim}',
-        parse_mode='HTML')
 
 async def namoz_update_reminder(ctx: ContextTypes.DEFAULT_TYPE):
     """Har oy 1-sanada namoz jadvalini yangilash eslatmasi"""
@@ -2206,30 +2082,29 @@ async def schedule_todays_prayers(app_obj, date_obj=None):
     if date_obj is None:
         date_obj = datetime.now(TZ).date()
     sana  = date_obj.strftime('%d.%m.%Y')
-    times = get_prayer_times(date_obj)
+    times = await get_prayer_times(date_obj)
     if not times:
         logger.error('Namoz vaqtlari olinmadi — API javob bermadi')
         return
-    now = datetime.now(TZ)
+    now       = datetime.now(TZ)
+    xufton_dt = None
     for namoz, vaqt_str in times.items():
         if namoz not in NAMOZ_COL or not vaqt_str:
             continue
-        prayer_dt   = _parse_prayer_dt(vaqt_str, date_obj)
-        reminder_dt = prayer_dt - timedelta(minutes=20)
-        question_dt = prayer_dt + timedelta(minutes=15)
-        job_data = {'namoz': namoz, 'vaqt': vaqt_str, 'sana': sana}
-        if reminder_dt > now:
-            app_obj.job_queue.run_once(
-                prayer_reminder_job, when=reminder_dt,
-                data=job_data, name=f'reminder_{namoz}_{sana}')
+        prayer_dt = _parse_prayer_dt(vaqt_str, date_obj)
+        job_data  = {'namoz': namoz, 'vaqt': vaqt_str, 'sana': sana}
         if prayer_dt > now:
             app_obj.job_queue.run_once(
                 prayer_time_job, when=prayer_dt,
                 data=job_data, name=f'prayer_{namoz}_{sana}')
-        if question_dt > now:
+        if namoz == 'xufton':
+            xufton_dt = prayer_dt
+    if xufton_dt:
+        checkin_dt = xufton_dt + timedelta(minutes=20)
+        if checkin_dt > now:
             app_obj.job_queue.run_once(
-                prayer_question_job, when=question_dt,
-                data=job_data, name=f'question_{namoz}_{sana}')
+                prayer_checkin_job, when=checkin_dt,
+                data={'sana': sana}, name=f'checkin_{sana}')
     logger.info(f'{sana} namoz vaqtlari scheduled: {times}')
 
 async def daily_prayer_scheduler(ctx: ContextTypes.DEFAULT_TYPE):
@@ -2238,29 +2113,7 @@ async def daily_prayer_scheduler(ctx: ContextTypes.DEFAULT_TYPE):
 
 async def namoz_weekly_stats(ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        def _get_stats():
-            ws      = get_ss().worksheet('NAMOZ')
-            vals    = ws.get_all_values()
-            today   = datetime.now(TZ).date()
-            week_ago = today - timedelta(days=7)
-            stats = {
-                'FERUDIN': {n: {'ok': 0, 'no': 0} for n in NAMOZ_UZ},
-                'GULOYIM': {n: {'ok': 0, 'no': 0} for n in NAMOZ_UZ},
-            }
-            for row in vals[1:]:
-                if len(row) < 7: continue
-                try: row_date = datetime.strptime(row[0], '%d.%m.%Y').date()
-                except: continue
-                if row_date < week_ago or row_date > today: continue
-                kim = row[6]
-                if kim not in stats: continue
-                for i, namoz in enumerate(NAMOZ_UZ):
-                    val = row[i + 1] if i + 1 < len(row) else ''
-                    if val == "O'QILDI":     stats[kim][namoz]['ok'] += 1
-                    elif val == "O'QILMADI": stats[kim][namoz]['no'] += 1
-            return stats
-
-        stats = await asyncio.to_thread(_get_stats)
+        stats = await store.namoz_weekly_stats(datetime.now(TZ).date())
         txt = '📊 <b>HAFTALIK NAMOZ STATISTIKASI</b>\n\n'
         for kim, data in stats.items():
             total_ok = sum(v['ok'] for v in data.values())
@@ -2280,15 +2133,15 @@ async def namoz_weekly_stats(ctx: ContextTypes.DEFAULT_TYPE):
 # ══════════════════════════════════════════════════════════
 async def daily_report(ctx: ContextTypes.DEFAULT_TYPE):
     try:
-        dv  = get_bugun()
-        bal = get_balance()
+        dv  = await get_bugun()
+        bal = await get_balance()
         txt = f'📊 <b>{today_str()} — Kunlik hisobot</b>\n\n<b>📤 Chiqimlar:</b>\n'
         txt += ('\n'.join(f'  • {c["tur"]}: {sstr(c["usd"],c["uzs"])}' for c in dv['ch'])) or "  Yo'q"
         txt += '\n\n<b>📥 Kirimlar:</b>\n'
         txt += ('\n'.join(f'  • {k["tur"]}: {sstr(k["usd"],k["uzs"])}' for k in dv['ki'])) or "  Yo'q"
         txt += (f'\n\n▪️ Jami chiqim: <b>{sstr(dv["chU"],dv["chZ"])}</b>'
                 f'\n▪️ Jami kirim:  <b>{sstr(dv["kiU"],dv["kiZ"])}</b>'
-                f'\n\n💰 <b>BALANCE: {round(bal,2)}$</b>')
+                f'\n\n💰 <b>BALANCE: {sstr(*bal)}</b>')
         for cid in [CHAT_1, CHAT_2]:
             try: await ctx.bot.send_message(chat_id=cid, text=txt, parse_mode='HTML')
             except Exception as e: logger.error(f'daily {cid}: {e}')
@@ -2305,10 +2158,6 @@ def main():
     # Startup: kategoriyalar va QARZ varag'ini yuklash
     async def on_startup(application):
         await load_categories()
-        await ensure_qarz()
-        await ensure_namoz_sheet()
-        await ensure_tasks_sheet()
-        await ensure_memory_sheet()
         await schedule_todays_prayers(application)
         await reschedule_pending_tasks(application)
         logger.info('Startup: barcha tizimlar yuklandi (QARZ, NAMOZ, TASKS, MEMORY)')
@@ -2381,7 +2230,7 @@ def main():
     app.add_handler(CallbackQueryHandler(ai_callback,     pattern='^AI_'))
     app.add_handler(CallbackQueryHandler(qarz_callback,   pattern='^QARZ_'))
     app.add_handler(CallbackQueryHandler(admin_callback,  pattern='^(ADMIN_|ADM_)'))
-    app.add_handler(CallbackQueryHandler(namoz_callback,  pattern='^NAMOZ_'))
+    app.add_handler(CallbackQueryHandler(namoz_checkin_callback, pattern='^NCHK_'))
     app.add_handler(CallbackQueryHandler(tasks_callback,  pattern='^TASK_'))
 
     # Conversation handlers
@@ -2444,170 +2293,131 @@ class UpdateTransaction(BaseModel):
     note:    Optional[str]   = None
     sana:    Optional[str]   = None   # ← YANGI: sana ham tahrirlash mumkin
 
-def read_sheet(sheet_name: str):
+def _sheets_update_transaction(sheet_name, old, patch_disp):
+    """UUID Sheets'da saqlanmagani uchun qatorni eski qiymatlar bo'yicha
+    (sana+egasi+tur+summa+vaqt) moslashtirib topamiz — best-effort."""
     sh   = get_ss().worksheet(sheet_name)
     rows = sh.get_all_values()
-    result = []
     for i, row in enumerate(rows[2:], start=3):
-        if len(row) < 5 or not row[2] or not row[4]: continue
-        usd = num_clean(row[6]) if len(row) > 6 and row[6] else 0.0
-        uzs = num_clean(row[7]) if len(row) > 7 and row[7] else 0.0
-        result.append({
-            'row':   i, 'type':  sheet_name,
-            'sana':  norm_date(row[2]),
-            'egasi': row[3] if len(row)>3 else '',
-            'tur':   row[4] if len(row)>4 else '',
-            'tolov': row[5] if len(row)>5 else '',
-            'usd':   usd, 'uzs': uzs,
-            'vaqt':  row[8] if len(row)>8 and row[8] else '',
-            'note':  row[9] if len(row)>9 else '',
-        })
-    return result
-
-def find_next_row(sh):
-    col_c = sh.col_values(3)
-    last  = 2
-    for i, v in enumerate(col_c):
-        if i < 2: continue
-        if v and str(v).strip(): last = i + 1
-    return last + 1
+        if len(row) < 8: continue
+        if (norm_date(row[2] if len(row)>2 else '') == old['sana']
+                and (row[3] if len(row)>3 else '') == old['egasi']
+                and (row[4] if len(row)>4 else '') == old['tur']
+                and num_clean(row[6] if len(row)>6 else '') == old['usd']
+                and num_clean(row[7] if len(row)>7 else '') == old['uzs']
+                and (row[8] if len(row)>8 else '') == old['vaqt']):
+            if 'sana' in patch_disp:  sh.update(f'C{i}', [[patch_disp['sana']]])
+            if 'egasi' in patch_disp: sh.update(f'D{i}', [[patch_disp['egasi']]])
+            if 'tur' in patch_disp:   sh.update(f'E{i}', [[patch_disp['tur']]])
+            if 'tolov' in patch_disp: sh.update(f'F{i}', [[patch_disp['tolov']]])
+            if 'usd' in patch_disp:   sh.update(f'G{i}', [[patch_disp['usd']]])
+            if 'uzs' in patch_disp:   sh.update(f'H{i}', [[patch_disp['uzs']]])
+            if 'note' in patch_disp:  sh.update(f'J{i}', [[patch_disp['note']]])
+            return
+    logger.warning(f'_sheets_update_transaction: mos qator topilmadi ({sheet_name})')
 
 @api.get('/')
 def root(): return {'status':'ok','message':'Family Accounting API'}
 
 @api.get('/balance')
-def balance_endpoint():
+async def balance_endpoint():
     try:
-        ss = get_ss()
-        for sheet, cell in [('KUNLIK_VIEW','E2'),('DASHBOARD','B2')]:
-            try:
-                raw = ss.worksheet(sheet).acell(cell).value
-                if not raw: continue
-                v = num_clean(raw)
-                if v > 0: return {'balance':round(v,2),'formatted':f'{round(v,2)}$'}
-            except: continue
-        return {'balance':0,'formatted':'0$'}
+        usd, uzs = await get_balance()
+        return {'balance_usd':usd,'balance_uzs':uzs,'formatted':sstr(usd,uzs)}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.get('/today')
-def get_today_api():
+async def get_today_api():
     try:
-        today  = today_str()
-        ss     = get_ss()
-        result = {'date':today,'chiqimlar':[],'kirimlar':[],
-                  'total_ch_usd':0.0,'total_ch_uzs':0.0,
-                  'total_ki_usd':0.0,'total_ki_uzs':0.0}
-        for sname, key in [('CHIQIM','chiqimlar'),('KIRIM','kirimlar')]:
-            sh=ss.worksheet(sname); dates=sh.col_values(3); turs=sh.col_values(5)
-            egasi=sh.col_values(4); tolov=sh.col_values(6)
-            usds=sh.col_values(7); uzss=sh.col_values(8); notes=sh.col_values(10)
-            n=max(len(dates),len(turs))
-            for i in range(2,n):
-                d=str(dates[i]).strip() if i<len(dates) else ''
-                if not d or norm_date(d)!=today: continue
-                tur=str(turs[i]).strip() if i<len(turs) else ''
-                if not tur: continue
-                u=num_clean(usds[i] if i<len(usds) else '')
-                z=num_clean(uzss[i] if i<len(uzss) else '')
-                result[key].append({'row':i+1,'tur':tur,
-                    'egasi':str(egasi[i]).strip() if i<len(egasi) else '',
-                    'tolov':str(tolov[i]).strip() if i<len(tolov) else '',
-                    'usd':u,'uzs':z,'note':str(notes[i]).strip() if i<len(notes) else ''})
-                if key=='chiqimlar': result['total_ch_usd']+=u; result['total_ch_uzs']+=z
-                else: result['total_ki_usd']+=u; result['total_ki_uzs']+=z
-        return result
+        d = await get_bugun()
+        return {'date':today_str(),'chiqimlar':d['ch'],'kirimlar':d['ki'],
+                'total_ch_usd':round(d['chU'],2),'total_ch_uzs':round(d['chZ'],2),
+                'total_ki_usd':round(d['kiU'],2),'total_ki_uzs':round(d['kiZ'],2)}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.get('/by-date')
-def get_by_date(date: str = Query(...)):
+async def get_by_date(date: str = Query(...)):
     try:
-        ss=get_ss(); result={'date':date,'chiqimlar':[],'kirimlar':[]}
-        for sname,key in [('CHIQIM','chiqimlar'),('KIRIM','kirimlar')]:
-            sh=ss.worksheet(sname); dates=sh.col_values(3); turs=sh.col_values(5)
-            egasi=sh.col_values(4); tolov=sh.col_values(6)
-            usds=sh.col_values(7); uzss=sh.col_values(8); notes=sh.col_values(10)
-            n=max(len(dates),len(turs))
-            for i in range(2,n):
-                d=str(dates[i]).strip() if i<len(dates) else ''
-                if not d or norm_date(d)!=date: continue
-                tur=str(turs[i]).strip() if i<len(turs) else ''
-                if not tur: continue
-                u=num_clean(usds[i] if i<len(usds) else '')
-                z=num_clean(uzss[i] if i<len(uzss) else '')
-                result[key].append({'row':i+1,'tur':tur,
-                    'egasi':str(egasi[i]).strip() if i<len(egasi) else '',
-                    'tolov':str(tolov[i]).strip() if i<len(tolov) else '',
-                    'usd':u,'uzs':z,'note':str(notes[i]).strip() if i<len(notes) else ''})
-        return result
+        d = await store.get_bugun(date)
+        return {'date':date,'chiqimlar':d['ch'],'kirimlar':d['ki']}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.get('/by-filter')
-def get_by_filter(
+async def get_by_filter(
     tip:str=Query('CHIQIM'),davr:str=Query('bu_oy'),
     tur:str=Query('BARCHASI'),date_from:str=Query(None),date_to:str=Query(None)
 ):
     try:
-        rows,total_usd,total_uzs=get_filtered(tip,davr,tur,date_from,date_to)
+        rows,total_usd,total_uzs = await get_filtered(tip,davr,tur,date_from,date_to)
         return {'rows':rows,'total_usd':round(total_usd,2),'total_uzs':round(total_uzs,2),'count':len(rows)}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.get('/history')
-def get_history(limit:int=100):
+async def get_history(limit:int=100):
     try:
-        all_tx=read_sheet('CHIQIM')+read_sheet('KIRIM')
-        all_tx.sort(key=lambda x:datetime.strptime(x['sana'],'%d.%m.%Y') if x['sana'] else datetime.min, reverse=True)
-        return {'transactions':all_tx[:limit],'total':len(all_tx)}
+        txs = await store.get_history(limit)
+        return {'transactions':txs,'total':len(txs)}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.get('/stats')
-def get_stats():
+async def get_stats():
     try:
-        ch=read_sheet('CHIQIM'); ki=read_sheet('KIRIM')
-        ch_by={}; ki_by={}
-        for t in ch:
-            v=t['usd']+(t['uzs']/12000 if t['uzs'] else 0)
-            ch_by[t['tur']]=ch_by.get(t['tur'],0)+v
-        for t in ki:
-            v=t['usd']+(t['uzs']/12000 if t['uzs'] else 0)
-            ki_by[t['tur']]=ki_by.get(t['tur'],0)+v
-        chs=sorted(ch_by.items(),key=lambda x:x[1],reverse=True)
-        kis=sorted(ki_by.items(),key=lambda x:x[1],reverse=True)
+        ch_by, ch_usd, ch_uzs = await store.get_stats('CHIQIM','bu_oy')
+        ki_by, ki_usd, ki_uzs = await store.get_stats('KIRIM','bu_oy')
+        def _shape(by_cat):
+            ranked = sorted(by_cat.items(), key=lambda x: x[1]['usd']+x[1]['uzs']/12000, reverse=True)
+            return [{'tur':t,'usd':round(v['usd'],2),'uzs':round(v['uzs'],2),'count':v['count']} for t,v in ranked]
+        ch_items, ki_items = _shape(ch_by), _shape(ki_by)
         return {
-            'chiqim':{'by_tur':chs,'top':chs[0] if chs else None,'bottom':chs[-1] if chs else None,'total_usd':round(sum(ch_by.values()),2),'count':len(ch)},
-            'kirim': {'by_tur':kis,'top':kis[0] if kis else None,'bottom':kis[-1] if kis else None,'total_usd':round(sum(ki_by.values()),2),'count':len(ki)},
-            'net':round(sum(ki_by.values())-sum(ch_by.values()),2),
+            'chiqim':{'by_tur':ch_items,'top':ch_items[0] if ch_items else None,'bottom':ch_items[-1] if ch_items else None,
+                      'total_usd':round(ch_usd,2),'total_uzs':round(ch_uzs,2),'count':sum(v['count'] for v in ch_by.values())},
+            'kirim': {'by_tur':ki_items,'top':ki_items[0] if ki_items else None,'bottom':ki_items[-1] if ki_items else None,
+                      'total_usd':round(ki_usd,2),'total_uzs':round(ki_uzs,2),'count':sum(v['count'] for v in ki_by.values())},
+            'net_usd':round(ki_usd-ch_usd,2),'net_uzs':round(ki_uzs-ch_uzs,2),
         }
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.post('/transaction')
-def add_transaction(tx: Transaction):
+async def add_transaction_api(tx: Transaction):
     try:
-        ss=get_ss(); sh=ss.worksheet(tx.type)
-        nr=find_next_row(sh)
-        usd   = tx.summa if tx.valyuta=='USD' else ''
-        uzs   = tx.summa if tx.valyuta=='UZS' else ''
-        now_t = datetime.now(TZ).strftime('%H:%M')
-        sh.update(f'B{nr}:I{nr}',[[nr-2,tx.sana,tx.egasi,tx.tur,tx.tolov,usd,uzs,now_t]])
-        sh.update(f'J{nr}',[[tx.note or '']])
-        return {'success':True,'row':nr,'message':'Saqlandi'}
+        usd_val = tx.summa if tx.valyuta=='USD' else 0
+        uzs_val = tx.summa if tx.valyuta=='UZS' else 0
+        now_t   = datetime.now(TZ).strftime('%H:%M')
+        new_id  = await store.add_transaction(tx.type, tx.sana, tx.egasi, tx.tur, tx.tolov,
+                                               usd_val, uzs_val, now_t, tx.note)
+        st = {'egasi':tx.egasi,'tur':tx.tur,'tolov':tx.tolov,'valyuta':tx.valyuta,'summa':tx.summa,'note':tx.note}
+        _mirror_task(f'api_transaction:{tx.type}', _sheets_save_row, tx.type, st, tx.sana, now_t)
+        return {'success':True,'id':new_id,'message':'Saqlandi'}
     except Exception as e: raise HTTPException(500, str(e))
 
-@api.put('/transaction/{sheet}/{row}')
-def update_transaction(sheet:str, row:int, data:UpdateTransaction):
+@api.put('/transaction/{tx_id}')
+async def update_transaction_api(tx_id: str, data: UpdateTransaction):
     try:
-        if sheet not in ['CHIQIM','KIRIM']: raise HTTPException(400,"Sheet noto'g'ri")
-        ss=get_ss(); sh=ss.worksheet(sheet)
-        if data.sana:   sh.update(f'C{row}',[[data.sana]])   # ← YANGI
-        if data.egasi:  sh.update(f'D{row}',[[data.egasi]])
-        if data.tur:    sh.update(f'E{row}',[[data.tur]])
-        if data.tolov:  sh.update(f'F{row}',[[data.tolov]])
+        old = await store.transaction_get(tx_id)
+        if not old: raise HTTPException(404, "Tranzaksiya topilmadi")
+        sheet_name = old['type']
+        patch, patch_disp = {}, {}
+        if data.sana is not None:
+            try: patch['date'] = datetime.strptime(data.sana, '%d.%m.%Y').strftime('%Y-%m-%d')
+            except Exception: patch['date'] = data.sana
+            patch_disp['sana'] = data.sana
+        if data.egasi is not None:  patch['owner'] = patch_disp['egasi'] = data.egasi
+        if data.tur is not None:    patch['category'] = patch_disp['tur'] = data.tur
+        if data.tolov is not None:  patch['payment_method'] = patch_disp['tolov'] = data.tolov
+        if data.note is not None:   patch['note'] = patch_disp['note'] = data.note
         if data.summa is not None and data.summa > 0:
-            if data.valyuta=='USD':
-                sh.update(f'G{row}',[[data.summa]]); sh.update(f'H{row}',[['']])
-            else:
-                sh.update(f'H{row}',[[data.summa]]); sh.update(f'G{row}',[['']])
-        if data.note is not None: sh.update(f'J{row}',[[data.note]])
+            if data.valyuta == 'USD':
+                patch['amount_usd'], patch['amount_uzs'] = data.summa, None
+                patch_disp['usd'], patch_disp['uzs'] = data.summa, ''
+            elif data.valyuta == 'UZS':
+                patch['amount_uzs'], patch['amount_usd'] = data.summa, None
+                patch_disp['uzs'], patch_disp['usd'] = data.summa, ''
+        if not patch:
+            return {'success':True,'message':"O'zgarish yo'q"}
+        await store.update_transaction(tx_id, patch)
+        _mirror_task('api_update_transaction', _sheets_update_transaction, sheet_name, old, patch_disp)
         return {'success':True,'message':'Yangilandi'}
+    except HTTPException: raise
     except Exception as e: raise HTTPException(500, str(e))
 
 # ── QARZ API ────────────────────────────────────────────
@@ -2621,103 +2431,59 @@ class QarzModel(BaseModel):
     note:      Optional[str]   = ''
 
 @api.get('/qarz/list')
-def qarz_list_api():
+async def qarz_list_api():
     try:
-        ss = get_ss()
-        try: ws = ss.worksheet('QARZ')
-        except: return {'success':True,'data':[]}
-        rows = ws.get_all_values()
-        return {'success':True,'data':qarz_to_list(rows)}
+        return {'success':True,'data':await store.qarz_active()}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.post('/qarz/add')
-def qarz_add_api(q: QarzModel):
+async def qarz_add_api(q: QarzModel):
     try:
-        ss    = get_ss()
         today = datetime.now(TZ).strftime('%d.%m.%Y')
-        try: ws = ss.worksheet('QARZ')
-        except:
-            ws = ss.add_worksheet(title='QARZ', rows=500, cols=12)
-            ws.update('A1:J1', [['raqam','tur','kim','summa_uzs','summa_usd',
-                                  'sana','muddat','holat','qaytarilgan_sana','note']])
-        rows = ws.get_all_values()
-        ws.append_row([
-            len(rows), q.tur, q.kim,
-            q.summa_uzs or '', q.summa_usd or '',
-            q.sana or today, q.muddat, 'AKTIV', '', q.note or ''
-        ], value_input_option='USER_ENTERED')
+        sana  = q.sana or today
+        qarz_id = await store.qarz_add(q.tur, q.kim, q.summa_uzs or None, q.summa_usd or None,
+                                        sana, q.muddat, q.note or '')
+        _mirror_task('qarz_append', _sheets_qarz_append,
+                     {'tur':q.tur,'kim':q.kim,'summa_uzs':q.summa_uzs or '','summa_usd':q.summa_usd or '',
+                      'muddat':q.muddat,'note':q.note or ''}, sana)
 
-        # BALANCE GA TA'SIR — CHIQIM / KIRIM ga yozish
         egasi = 'FERUDIN'
-        try:
-            usd_val = float(q.summa_usd) if q.summa_usd else None
-            uzs_val = float(q.summa_uzs) if q.summa_uzs else None
+        if q.tur == 'BERILGAN':
+            await _record_qarz_transaction('CHIQIM', egasi, q.summa_usd, q.summa_uzs,
+                f'Qarz berildi: {q.kim}', 'QARZ BERILDI')
+        else:
+            await _record_qarz_transaction('KIRIM', egasi, q.summa_usd, q.summa_uzs,
+                f'Qarz olindi: {q.kim}', 'QARZ OLINDI')
 
-            if q.tur == 'BERILGAN':
-                sheet_name = 'CHIQIM'
-                tur_name   = 'QARZ BERILDI'
-                note_tx    = f'Qarz berildi: {q.kim}'
-            else:
-                sheet_name = 'KIRIM'
-                tur_name   = 'QARZ OLINDI'
-                note_tx    = f'Qarz olindi: {q.kim}'
-
-            sh    = ss.worksheet(sheet_name)
-            col_c = sh.col_values(3)
-            last  = 2
-            for i, v in enumerate(col_c):
-                if i < 2: continue
-                if v and str(v).strip(): last = i + 1
-            new_row = last + 1
-
-            try: usd = float(usd_val) if usd_val else ''
-            except: usd = ''
-            try: uzs = float(uzs_val) if uzs_val else ''
-            except: uzs = ''
-
-            sh.update(f'B{new_row}:H{new_row}', [[
-                new_row - 2, today, egasi, tur_name, 'CASH', usd, uzs
-            ]], value_input_option='USER_ENTERED')
-            sh.update(f'J{new_row}', [[note_tx]])
-            logger.info(
-                f'qarz_add_api balance: {sheet_name} row={new_row} '
-                f'tur={tur_name} usd={usd} uzs={uzs}')
-        except Exception as se:
-            logger.error(f'qarz_add_api balance FAILED: {se}')
-
-        return {'success': True}
+        return {'success': True, 'id': qarz_id}
     except Exception as e:
         raise HTTPException(500, str(e))
 
-@api.post('/qarz/close/{row_index}')
-def qarz_close_api(row_index: int):
+@api.post('/qarz/close/{qarz_id}')
+async def qarz_close_api(qarz_id: str):
     try:
-        ss    = get_ss()
-        ws    = ss.worksheet('QARZ')
-        today = datetime.now(TZ).strftime('%d.%m.%Y')
+        today = today_str()
+        r = await store.qarz_get(qarz_id)
+        if not r: raise HTTPException(404, "Qarz topilmadi")
+        tur, kim  = r['tur'], r['kim']
+        summa_uzs = r.get('summa_uzs')
+        summa_usd = r.get('summa_usd')
 
-        # Qarz ma'lumotlarini olish
-        row       = ws.row_values(row_index)
-        tur       = row[1] if len(row) > 1 else 'BERILGAN'
-        kim       = row[2] if len(row) > 2 else '?'
-        summa_uzs = row[3] if len(row) > 3 and row[3] and str(row[3]).strip() else None
-        summa_usd = row[4] if len(row) > 4 and row[4] and str(row[4]).strip() else None
-
-        ws.update_cell(row_index, 8, 'TUGADI')
-        ws.update_cell(row_index, 9, today)
+        await store.qarz_close(qarz_id, today)
 
         egasi = 'FERUDIN'
         if tur == 'BERILGAN':
-            qarz_to_sheet('KIRIM', egasi, summa_usd, summa_uzs,
+            await _record_qarz_transaction('KIRIM', egasi, summa_usd, summa_uzs,
                 f'Qarz qaytdi: {kim}', 'QARZ QAYTIB KELDI')
             effect = 'balance_plus'
         else:
-            qarz_to_sheet('CHIQIM', egasi, summa_usd, summa_uzs,
+            await _record_qarz_transaction('CHIQIM', egasi, summa_usd, summa_uzs,
                 f'Qarz qaytarildi: {kim}', 'QARZ QAYTARILDI')
             effect = 'balance_minus'
 
-        bal = get_balance()
-        return {'success': True, 'effect': effect, 'balance': round(bal, 2), 'kim': kim}
+        bal_usd, bal_uzs = await get_balance()
+        return {'success': True, 'effect': effect, 'balance_usd': bal_usd, 'balance_uzs': bal_uzs, 'kim': kim}
+    except HTTPException: raise
     except Exception as e:
         raise HTTPException(500, str(e))
 
@@ -2729,41 +2495,38 @@ class TaskModel(BaseModel):
     chat_id: str = ''
 
 @api.get('/tasks')
-def get_tasks_api(status: str = 'FAOL'):
+async def get_tasks_api(status: str = 'FAOL'):
     try:
-        ws   = get_ss().worksheet('TASKS')
-        vals = ws.get_all_values()
-        now  = datetime.now(TZ)
+        now = datetime.now(TZ)
         result = []
-        for i, row in enumerate(vals[1:], start=2):
-            if len(row) < 6: continue
-            if status != 'ALL' and row[5] != status: continue
+        for t in await store.tasks_list(status):
             overdue = False
             try:
-                dt = TZ.localize(datetime.strptime(row[2], '%d.%m.%Y %H:%M'))
-                overdue = dt < now and row[5] == 'FAOL'
-            except: pass
-            result.append({'row':i,'id':row[0],'yaratilgan':row[1],'vaqt':row[2],
-                           'matn':row[3],'egasi':row[4],'holat':row[5],'overdue':overdue})
+                dt = TZ.localize(datetime.strptime(t['vaqt'], '%d.%m.%Y %H:%M'))
+                overdue = dt < now and t['holat'] == 'FAOL'
+            except Exception: pass
+            result.append({**t, 'overdue': overdue})
         result.sort(key=lambda x: x['vaqt'])
         return {'tasks':result,'count':len(result)}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.post('/tasks')
-def add_task_api(task: TaskModel):
+async def add_task_api(task: TaskModel):
     try:
-        ws    = get_ss().worksheet('TASKS')
-        vals  = ws.get_all_values()
-        today = datetime.now(TZ).strftime('%d.%m.%Y')
-        ws.append_row([len(vals),today,task.vaqt,task.matn,task.egasi,'FAOL',task.chat_id],
-                      value_input_option='USER_ENTERED')
-        return {'success':True}
+        today   = datetime.now(TZ).strftime('%d.%m.%Y')
+        chat_id = task.chat_id or str(CHAT_1)
+        new_id  = await store.task_add(task.matn, task.vaqt, task.egasi, chat_id, today)
+        _mirror_task('api_add_task', _sheets_task_append, task.matn, task.vaqt, task.egasi, chat_id, today)
+        return {'success':True,'id':new_id}
     except Exception as e: raise HTTPException(500, str(e))
 
-@api.post('/tasks/done/{row}')
-def task_done_api(row: int):
+@api.post('/tasks/done/{task_id}')
+async def task_done_api(task_id: str):
     try:
-        get_ss().worksheet('TASKS').update_cell(row, 6, 'BAJARILDI')
+        t = await store.task_get(task_id)
+        await store.task_mark(task_id, 'BAJARILDI')
+        if t:
+            _mirror_task('api_task_done', _sheets_task_mark, t['matn'], t['egasi'], 'BAJARILDI')
         return {'success':True}
     except Exception as e: raise HTTPException(500, str(e))
 
@@ -2774,56 +2537,26 @@ class MemoryModel(BaseModel):
     kim:    str = 'FERUDIN'
 
 @api.get('/memory')
-def get_memory_api(q: str = ''):
+async def get_memory_api(q: str = ''):
     try:
-        ws   = get_ss().worksheet('MEMORY')
-        vals = ws.get_all_values()
-        ql   = q.lower()
-        result = []
-        for row in vals[1:]:
-            if len(row) < 4: continue
-            if not q or ql in row[2].lower() or ql in row[3].lower():
-                result.append({'kalit':row[2],'qiymat':row[3],
-                               'kim':row[4] if len(row)>4 else '','sana':row[1]})
-        return {'memories':result,'count':len(result)}
+        memories = await store.memory_search(q)
+        return {'memories':memories,'count':len(memories)}
     except Exception as e: raise HTTPException(500, str(e))
 
 @api.post('/memory')
-def save_memory_api(mem: MemoryModel):
+async def save_memory_api(mem: MemoryModel):
     try:
-        ws    = get_ss().worksheet('MEMORY')
-        vals  = ws.get_all_values()
-        today = datetime.now(TZ).strftime('%d.%m.%Y')
-        for i, row in enumerate(vals[1:], start=2):
-            if len(row) >= 3 and row[2].lower() == mem.kalit.lower():
-                ws.update(f'B{i}:E{i}', [[today, mem.kalit, mem.qiymat, mem.kim]])
-                return {'success':True,'action':'updated'}
-        ws.append_row([len(vals), today, mem.kalit, mem.qiymat, mem.kim])
-        return {'success':True,'action':'created'}
+        today  = today_str()
+        action = await store.memory_save(mem.kalit, mem.qiymat, mem.kim, today)
+        _mirror_task('api_memory_save', _sheets_memory_save, mem.kalit, mem.qiymat, mem.kim, today)
+        return {'success':True,'action':'updated' if action=='yangilandi' else 'created'}
     except Exception as e: raise HTTPException(500, str(e))
 
 # ── NAMOZ API ────────────────────────────────────────────
 @api.get('/namoz/stats')
-def namoz_stats_api():
+async def namoz_stats_api():
     try:
-        ws      = get_ss().worksheet('NAMOZ')
-        vals    = ws.get_all_values()
-        today   = datetime.now(TZ).date()
-        wk_ago  = today - timedelta(days=7)
-        nl      = ['bomdod','peshin','asr','shom','xufton']
-        empty   = lambda: {n:{'ok':0,'no':0} for n in nl}
-        stats   = {'FERUDIN':empty(),'GULOYIM':empty()}
-        for row in vals[1:]:
-            if len(row) < 7: continue
-            try: rd = datetime.strptime(row[0],'%d.%m.%Y').date()
-            except: continue
-            if rd < wk_ago or rd > today: continue
-            kim = row[6]
-            if kim not in stats: continue
-            for i,n in enumerate(nl):
-                v = row[i+1] if i+1 < len(row) else ''
-                if v == "O'QILDI":     stats[kim][n]['ok'] += 1
-                elif v == "O'QILMADI": stats[kim][n]['no'] += 1
+        stats = await store.namoz_weekly_stats(datetime.now(TZ).date())
         return {'stats':stats}
     except Exception as e: raise HTTPException(500, str(e))
 
@@ -2940,7 +2673,8 @@ async def bnb_register(reg: BnBRegistration):
             tg_send_file(chat_id, data, "identification_card_FERUDIN.pdf",
                 "4/4 - identification card FERUDIN")
 
-        await _asyncio.to_thread(save_bnb_to_sheets, reg_dict)
+        await store.bnb_save(reg_dict)
+        _mirror_task('bnb_save', save_bnb_to_sheets, reg_dict)
         return {"success": True, "message": "Ro'yxatga olindi, hujjatlar yuborildi"}
     except Exception as e:
         raise HTTPException(500, str(e))
@@ -2982,10 +2716,9 @@ async def bnb_send_file(req: SendFileRequest):
         raise HTTPException(500, str(e))
 
 @api.get('/bnb/history')
-def bnb_history():
+async def bnb_history():
     try:
-        from bnb_services import get_bnb_history
-        return {"success": True, "data": get_bnb_history()}
+        return {"success": True, "data": await store.bnb_history()}
     except Exception as e:
         raise HTTPException(500, str(e))
 
