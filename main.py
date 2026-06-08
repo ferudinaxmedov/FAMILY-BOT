@@ -2403,10 +2403,24 @@ def main():
 
     # Startup: kategoriyalar va QARZ varag'ini yuklash
     async def on_startup(application):
-        await load_categories()
-        await schedule_todays_prayers(application)
-        await reschedule_pending_tasks(application)
-        logger.info('Startup: barcha tizimlar yuklandi (QARZ, NAMOZ, TASKS, MEMORY)')
+        # Supabase env tekshirish
+        sb_url  = os.environ.get('SUPABASE_URL', '')
+        sb_key  = os.environ.get('SUPABASE_SERVICE_ROLE_KEY', '')
+        if not sb_url or not sb_key:
+            logger.error(f'SUPABASE env YOQLIGINI TEKSHIRING: URL={bool(sb_url)} KEY={bool(sb_key)}')
+        try:
+            await load_categories()
+        except Exception as e:
+            logger.error(f'load_categories xato (DB muammo?): {e}')
+        try:
+            await schedule_todays_prayers(application)
+        except Exception as e:
+            logger.error(f'schedule_todays_prayers xato: {e}')
+        try:
+            await reschedule_pending_tasks(application)
+        except Exception as e:
+            logger.error(f'reschedule_pending_tasks xato: {e}')
+        logger.info('Bot ishga tushdi.')
     app.post_init = on_startup
 
     # ── Hisobot conversation ─────────────────────────────
