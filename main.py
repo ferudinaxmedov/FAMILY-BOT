@@ -33,9 +33,11 @@ ALLOWED = {CHAT_1, CHAT_2}
 # ── CONVERSATION STATES ──────────────────────────────────
 TUR, EGASI, TOLOV, VALYUTA, SUMMA, NOTE = range(6)
 H_TIP, H_DAVR, H_TUR, H_DATE_FROM, H_DATE_TO = range(6, 11)
+PAX_UZBEK_DATE, PAX_APT_DATE, PAX_DEP_DATE, PAX_APT_NUM, PAX_PAYMENT, PAX_CONFIRM = range(11, 17)
 
 # ── PENDING AI DATA (memory) ─────────────────────────────
 pending_ai: dict = {}   # {user_id: {op_type, data, source}}
+_pax_data: dict  = {}   # {user_id: passport registration dict}
 
 # ── KATEGORIYALAR KESHI ──────────────────────────────────
 _cats: dict = {'chiqim': None, 'kirim': None}
@@ -599,6 +601,21 @@ async def _finalize(message, ctx):
 async def outer_text_handler(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
     """ConversationHandler faol bo'lmaganda ishga tushadi"""
     if not ok(update): return
+
+    # Passport registration flow
+    uid  = update.effective_user.id
+    pax  = _pax_data.get(uid)
+    if pax:
+        state = pax.get('_state')
+        if state == 'PAX_UZBEK_DATE':
+            await pax_uzbek_date(update, ctx); return
+        elif state == 'PAX_APT_DATE':
+            await pax_apt_date(update, ctx); return
+        elif state == 'PAX_DEP_DATE':
+            await pax_dep_date(update, ctx); return
+        elif state == 'PAX_PAYMENT':
+            await pax_payment(update, ctx); return
+
     # Aktiv holatlar
     if ctx.user_data.get('ai_editing'):
         await ai_edit_text(update, ctx); return
@@ -675,7 +692,7 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
                 'role': 'user',
                 'content': [
                     {'type':'image','source':{'type':'base64','media_type':media_type,'data':image_b64}},
-                    {'type':'text','text':'1=namoz vaqtlari jadvali (Bomdod/Peshin/Asr/Shom/Xufton ko\'rinadi), 2=chek/kvitansiya/boshqa. Faqat bitta raqam.'}
+                    {'type':'text','text':'1=namoz vaqtlari jadvali (Bomdod/Peshin/Asr/Shom/Xufton ko\'rinadi), 2=pasport yoki ID hujjat (ism, tug\'ilgan sana, pasport raqami ko\'rinadi), 3=chek/kvitansiya/boshqa. Faqat bitta raqam.'}
                 ]
             }]
         )
@@ -683,6 +700,10 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
 
         if rasm_tur == '1':
             await handle_namoz_photo(update, ctx, msg, image_b64, media_type)
+            return
+
+        if rasm_tur == '2':
+            await handle_passport_photo(update, ctx, msg, image_b64, media_type)
             return
 
         # Chek/kvitansiya — mavjud logic
@@ -723,6 +744,231 @@ async def handle_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
         else:
             await msg.edit_text(f'❌ Xatolik: {str(e)[:120]}')
             logger.error(f'handle_photo: {e}')
+
+
+# ══════════════════════════════════════════════════════════
+# PASSPORT FOTO → ARIZA (BnB ro'yxatga olish)
+# ══════════════════════════════════════════════════════════
+APT_LIST = ['23', '28', '68', '80', '84', '88', '701']
+
+async def handle_passport_photo(update: Update, ctx: ContextTypes.DEFAULT_TYPE,
+                                 msg, image_b64: str, media_type: str):
+    """Pasport rasmidan ma'lumot ajratib olish → ro'yxatga olish suhbatini boshlash"""
+    try:
+        import anthropic
+        client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)
+        await msg.edit_text('🪪 Pasport tahlil qilinmoqda...')
+
+        resp = await asyncio.to_thread(
+            client.messages.create,
+            model='claude-opus-4-5',
+            max_tokens=400,
+            messages=[{
+                'role': 'user',
+                'content': [
+                    {'type': 'image', 'source': {'type': 'base64', 'media_type': media_type, 'data': image_b64}},
+                    {'type': 'text', 'text': (
+                        'Bu pasport yoki ID hujjat rasmi. '
+                        'Faqat JSON qaytargin (hech qanday izoh yozma):\n'
+                        '{"name":"<to\'liq ism familya>","nationality":"<fuqaroligi, masalan: Россия>","dob":"<YYYY-MM-DD>","passportId":"<pasport raqami>"}'
+                    )}
+                ]
+            }]
+        )
+        raw  = resp.content[0].text.strip()
+        raw  = re.sub(r'```(?:json)?\s*', '', raw).strip('`').strip()
+        pax  = json.loads(raw)
+
+        uid  = update.effective_user.id
+        _pax_data[uid] = {
+            'guests': [pax],
+            'paymentBy': 'direct',
+            '_state': 'PAX_UZBEK_DATE',
+        }
+
+        dob_disp = pax.get('dob', '?')
+        text = (
+            f"🪪 <b>Pasport ma'lumotlari:</b>\n\n"
+            f"👤 <b>{pax.get('name', '?')}</b>\n"
+            f"🌍 Fuqaroligi: {pax.get('nationality', '?')}\n"
+            f"🎂 Tug'ilgan: {dob_disp}\n"
+            f"📋 Pasport: {pax.get('passportId', '?')}\n\n"
+            f"📅 <b>O'zbekistonga qachon kirdi?</b>\n"
+            f"Format: <code>DD.MM.YYYY</code>"
+        )
+        await msg.edit_text(text, parse_mode='HTML')
+
+    except (json.JSONDecodeError, KeyError):
+        await msg.edit_text('❌ Pasportdan ma\'lumot ajratib bo\'lmadi. Rasm aniq ekanligini tekshiring.')
+    except Exception as e:
+        await msg.edit_text(f'❌ Xatolik: {str(e)[:120]}')
+        logger.error(f'handle_passport_photo: {e}')
+
+
+async def pax_uzbek_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = update.message.text.strip()
+    if text.lower() in ('bekor', 'cancel', '/cancel'):
+        _pax_data.pop(uid, None)
+        await update.message.reply_text('❌ Ro\'yxatga olish bekor qilindi.')
+        return
+    try:
+        datetime.strptime(text, '%d.%m.%Y')
+    except ValueError:
+        await update.message.reply_text('❌ Format noto\'g\'ri. Misol: <code>15.05.2025</code>', parse_mode='HTML')
+        return
+    _pax_data[uid]['uzbekEntryDate'] = datetime.strptime(text, '%d.%m.%Y').strftime('%Y-%m-%d')
+    _pax_data[uid]['_state'] = 'PAX_APT_DATE'
+    await update.message.reply_text('🏠 Apartamentga qachon kirdi?\nFormat: <code>DD.MM.YYYY</code>', parse_mode='HTML')
+
+
+async def pax_apt_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = update.message.text.strip()
+    if text.lower() in ('bekor', 'cancel', '/cancel'):
+        _pax_data.pop(uid, None)
+        await update.message.reply_text('❌ Ro\'yxatga olish bekor qilindi.')
+        return
+    try:
+        datetime.strptime(text, '%d.%m.%Y')
+    except ValueError:
+        await update.message.reply_text('❌ Format noto\'g\'ri. Misol: <code>01.06.2025</code>', parse_mode='HTML')
+        return
+    _pax_data[uid]['aptEntryDate'] = datetime.strptime(text, '%d.%m.%Y').strftime('%Y-%m-%d')
+    _pax_data[uid]['_state'] = 'PAX_DEP_DATE'
+    await update.message.reply_text('🚀 Qachon ketadi?\nFormat: <code>DD.MM.YYYY</code>', parse_mode='HTML')
+
+
+async def pax_dep_date(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = update.message.text.strip()
+    if text.lower() in ('bekor', 'cancel', '/cancel'):
+        _pax_data.pop(uid, None)
+        await update.message.reply_text('❌ Ro\'yxatga olish bekor qilindi.')
+        return
+    try:
+        dep = datetime.strptime(text, '%d.%m.%Y')
+    except ValueError:
+        await update.message.reply_text('❌ Format noto\'g\'ri. Misol: <code>10.06.2025</code>', parse_mode='HTML')
+        return
+    d    = _pax_data[uid]
+    dep_iso = dep.strftime('%Y-%m-%d')
+    apt_iso = d.get('aptEntryDate', dep_iso)
+    apt_dt  = datetime.strptime(apt_iso, '%Y-%m-%d')
+    d['departureDate'] = dep_iso
+    d['regStartDate']  = apt_dt.strftime('%Y-%m-%d')
+    d['regEndDate']    = (dep + timedelta(days=1)).strftime('%Y-%m-%d')
+    d['_state']        = 'PAX_APT_NUM'
+
+    kb = InlineKeyboardMarkup([
+        [InlineKeyboardButton(f'#{a}', callback_data=f'PAX_APT_{a}') for a in APT_LIST[:4]],
+        [InlineKeyboardButton(f'#{a}', callback_data=f'PAX_APT_{a}') for a in APT_LIST[4:]],
+    ])
+    await update.message.reply_text('🏢 Qaysi kvartira?', reply_markup=kb)
+
+
+async def pax_apt_num(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q    = update.callback_query
+    await q.answer()
+    uid  = update.effective_user.id
+    if uid not in _pax_data:
+        await q.edit_message_text('❌ Sessiya tugagan. Pasportni qaytadan yuboring.')
+        return
+    apt  = q.data.replace('PAX_APT_', '')
+    _pax_data[uid]['apartment'] = apt
+    _pax_data[uid]['_state']    = 'PAX_PAYMENT'
+    await q.edit_message_text(f'🚪 {apt}-kvartira tanlandi.\n\nQo\'shimcha xona raqami (bo\'lmasa "yo\'q" deb yozing):')
+
+
+async def pax_payment(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    uid  = update.effective_user.id
+    text = update.message.text.strip()
+    if text.lower() in ('bekor', 'cancel', '/cancel'):
+        _pax_data.pop(uid, None)
+        await update.message.reply_text('❌ Ro\'yxatga olish bekor qilindi.')
+        return
+    d    = _pax_data[uid]
+    d['room']   = '' if text.lower() in ("yo'q", 'yoq', '-', '') else text
+    d['_state'] = 'PAX_CONFIRM'
+
+    kb = InlineKeyboardMarkup([[
+        InlineKeyboardButton('🏠 AirBnB', callback_data='PAX_PAY_airbnb'),
+        InlineKeyboardButton('💵 To\'g\'ridan-to\'g\'ri', callback_data='PAX_PAY_direct'),
+    ]])
+    await update.message.reply_text("💳 To'lov turi:", reply_markup=kb)
+
+
+async def pax_confirm(update: Update, ctx: ContextTypes.DEFAULT_TYPE):
+    q   = update.callback_query
+    await q.answer()
+    uid = update.effective_user.id
+    d   = _pax_data.get(uid)
+    if not d:
+        await q.edit_message_text('❌ Sessiya tugagan. Pasportni qaytadan yuboring.')
+        return
+
+    pay_type = 'airbnb' if 'airbnb' in q.data else 'direct'
+    d['paymentBy'] = pay_type
+    d.pop('_state', None)
+
+    guest    = d.get('guests', [{}])[0]
+    apt      = d.get('apartment', '28')
+
+    def disp(iso):
+        try: return datetime.strptime(iso, '%Y-%m-%d').strftime('%d.%m.%Y')
+        except: return iso or '—'
+
+    summary = (
+        f"📋 <b>Ro'yxatga olish tasdiqlash</b>\n\n"
+        f"👤 {guest.get('name', '?')}\n"
+        f"🌍 {guest.get('nationality', '?')} · {guest.get('dob', '?')}\n"
+        f"📋 {guest.get('passportId', '?')}\n"
+        f"🇺🇿 O'zbekistonga: {disp(d.get('uzbekEntryDate',''))}\n"
+        f"🏠 Kirish: {disp(d.get('aptEntryDate',''))} → {disp(d.get('departureDate',''))}\n"
+        f"🏢 Kvartira: #{apt}"
+        + (f", xona: {d.get('room')}" if d.get('room') else '') + "\n"
+        f"💳 {pay_type.upper()}\n\n"
+        f"Hujjatlar tayyorlanmoqda..."
+    )
+    await q.edit_message_text(summary, parse_mode='HTML')
+
+    try:
+        from generate_doc import generate_ariza_doc
+        from bnb_services import get_drive_file, tg_send_file, APT_ISH, APT_CAD, FERUDIN_PDF_ID
+        import asyncio as _asyncio
+
+        ariza_bytes = generate_ariza_doc(d)
+        guest_name  = guest.get('name', 'mehmon').replace(' ', '_')[:20]
+        tg_send_file(update.effective_chat.id, ariza_bytes, f'Ariza_{apt}_{guest_name}.docx', '1/4 — ARIZA')
+
+        ish_id = APT_ISH.get(apt, '')
+        if ish_id:
+            data = await _asyncio.to_thread(get_drive_file, ish_id)
+            tg_send_file(update.effective_chat.id, data, f'Ishonchnoma_{apt}.pdf', '2/4 — Ishonchnoma')
+
+        cad_id = APT_CAD.get(apt, '')
+        if cad_id:
+            data = await _asyncio.to_thread(get_drive_file, cad_id)
+            tg_send_file(update.effective_chat.id, data, f'Kadastr_{apt}.pdf', '3/4 — Kadastr')
+
+        if FERUDIN_PDF_ID:
+            data = await _asyncio.to_thread(get_drive_file, FERUDIN_PDF_ID)
+            tg_send_file(update.effective_chat.id, data, 'identification_card_FERUDIN.pdf', '4/4 — ID Card')
+
+        await store.bnb_save(d)
+        from bnb_services import save_bnb_to_sheets
+        _mirror_task('bnb_save', save_bnb_to_sheets, d)
+
+        await ctx.bot.send_message(
+            update.effective_chat.id,
+            f"✅ <b>Ro'yxatga olindi!</b> {guest.get('name')} — #{apt}",
+            parse_mode='HTML'
+        )
+    except Exception as e:
+        await ctx.bot.send_message(update.effective_chat.id, f'❌ Xatolik: {str(e)[:200]}')
+        logger.error(f'pax_confirm: {e}')
+    finally:
+        _pax_data.pop(uid, None)
 
 
 def _sheets_namoz_times_save(year, month, days):
@@ -2232,6 +2478,8 @@ def main():
     app.add_handler(CallbackQueryHandler(admin_callback,  pattern='^(ADMIN_|ADM_)'))
     app.add_handler(CallbackQueryHandler(namoz_checkin_callback, pattern='^NCHK_'))
     app.add_handler(CallbackQueryHandler(tasks_callback,  pattern='^TASK_'))
+    app.add_handler(CallbackQueryHandler(pax_apt_num,     pattern='^PAX_APT_'))
+    app.add_handler(CallbackQueryHandler(pax_confirm,     pattern='^PAX_PAY_'))
 
     # Conversation handlers
     app.add_handler(hisobot_conv)
