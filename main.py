@@ -1287,36 +1287,28 @@ async def _ai_save(query, ctx, pending: dict, uid: int):
     op_type = pending['op_type']
     try:
         sheet_name = 'CHIQIM' if op_type == 'chiqim' else 'KIRIM'
-        ss    = get_ss()
-        ws    = ss.worksheet(sheet_name)
-        col_c = ws.col_values(3)
-        last  = 2
-        for i, v in enumerate(col_c):
-            if i < 2: continue
-            if v and str(v).strip(): last = i + 1
-        new_row = last + 1
-
         sana   = data.get('sana') or today_str()
         egasi  = data.get('egasi', 'FERUDIN')
         if str(uid) == CHAT_2 and 'egasi' not in data:
             egasi = 'GULOYIM'
-        tur    = data.get('tur','BOSHQA')
-        tolov  = data.get('tolov','NAQD')
-        usd    = data.get('summa_usd') or ''
-        uzs    = data.get('summa_uzs') or ''
-        note   = data.get('note','')
+        tur    = data.get('tur', 'BOSHQA')
+        tolov  = data.get('tolov', 'NAQD')
+        usd    = float(data.get('summa_usd') or 0)
+        uzs    = float(data.get('summa_uzs') or 0)
+        note   = data.get('note', '')
+        now_t  = datetime.now(TZ).strftime('%H:%M')
 
-        now_t = datetime.now(TZ).strftime('%H:%M')
-        ws.update(f'B{new_row}:I{new_row}', [[
-            new_row-2, sana, egasi, tur, tolov,
-            usd if usd else '', uzs if uzs else '', now_t
-        ]], value_input_option='USER_ENTERED')
-        ws.update(f'J{new_row}', [[note]])
+        # Supabase (asosiy) + Sheets (zaxira ko'chiriladi)
+        await store.add_transaction(sheet_name, sana, egasi, tur, tolov, usd, uzs, now_t, note)
+        st = {'egasi': egasi, 'tur': tur, 'tolov': tolov,
+              'valyuta': 'USD' if usd else 'UZS',
+              'summa': usd if usd else uzs, 'note': note}
+        _mirror_task(f'ai_save:{sheet_name}', _sheets_save_row, sheet_name, st, sana, now_t)
 
-        uzs_f = f"{float(uzs):,.0f} UZS" if uzs else ''
-        usd_f = f"{float(usd):.2f} USD"   if usd else ''
-        summa_f = ' / '.join(filter(None,[uzs_f, usd_f])) or '?'
-        ico = '💸' if op_type == 'chiqim' else '💰'
+        uzs_f   = f"{uzs:,.0f} UZS" if uzs else ''
+        usd_f   = f"{usd:.2f} USD"  if usd else ''
+        summa_f = ' / '.join(filter(None, [uzs_f, usd_f])) or '?'
+        ico     = '💸' if op_type == 'chiqim' else '💰'
 
         await query.edit_message_text(
             f'✅ <b>Saqlandi!</b>\n\n{ico} {tur}: <b>{summa_f}</b>\n📅 {sana}  👤 {egasi}\n💳 {tolov}'
